@@ -1,0 +1,90 @@
+<?php
+
+namespace App\Services;
+
+use App\Models\WhatsappSetting;
+use Illuminate\Support\Facades\Log;
+
+class WhatsappService
+{
+    public static function send($targetNumber, $message)
+    {
+        // 1. Ambil Pengaturan dari Database
+        $setting = WhatsappSetting::first();
+        if (!$setting) {
+            return ['status' => false, 'message' => 'Pengaturan WhatsApp belum dikonfigurasi.'];
+        }
+
+        // 2. Format Nomor (Pastikan 628...)
+        // Hapus karakter non-digit (seperti +, -, space)
+        $targetNumber = preg_replace('/[^0-9]/', '', $targetNumber);
+
+        if (substr($targetNumber, 0, 1) == '0') {
+            $targetNumber = '62' . substr($targetNumber, 1);
+        }
+
+        // 3. Cek Provider: API atau Gateway
+        if ($setting->wa_provider === 'gateway') {
+            // KIRIM VIA SELF-HOSTED GATEWAY (BAILEYS)
+            $url = ($setting->wa_gateway_url ?? 'http://localhost:3000') . '/send';
+            $data = [
+                'number' => $targetNumber,
+                'message' => $message,
+            ];
+
+            try {
+                $client = new \GuzzleHttp\Client();
+                $response = $client->post($url, [
+                    'json' => $data,
+                    'timeout' => 15,
+                    'http_errors' => false
+                ]);
+
+                $body = $response->getBody()->getContents();
+                $result = json_decode($body, true);
+
+                if ($response->getStatusCode() == 200 && isset($result['status']) && $result['status']) {
+                    return ['status' => true, 'response' => $body];
+                } else {
+                    return ['status' => false, 'message' => 'Gateway Error: ' . ($result['message'] ?? 'Unknown error')];
+                }
+            } catch (\Exception $e) {
+                Log::error("WA Gateway Exception: " . $e->getMessage());
+                return ['status' => false, 'message' => 'Gateway Exception: ' . $e->getMessage()];
+            }
+        }
+
+        // --- KIRIM VIA API EXTERNAL (Provider Lama) ---
+        $url = $setting->target_url;
+        $apiKey = $setting->api_key;
+        $sender = $setting->sender_number;
+
+        $data = [
+            'api_key' => $apiKey,
+            'nomor_pengirim' => $sender,
+            'nomor_penerima' => $targetNumber,
+            'pesan' => $message,
+        ];
+
+        try {
+            $client = new \GuzzleHttp\Client();
+            $response = $client->post($url, [
+                'form_params' => $data,
+                'timeout' => 10,
+                'http_errors' => false
+            ]);
+
+            $body = $response->getBody()->getContents();
+            Log::info("WA API Response: " . $body);
+
+            if ($response->getStatusCode() == 200) {
+                return ['status' => true, 'response' => $body];
+            } else {
+                return ['status' => false, 'message' => 'API Error (' . $response->getStatusCode() . '): ' . $body];
+            }
+        } catch (\Exception $e) {
+            Log::error("WA API Exception: " . $e->getMessage());
+            return ['status' => false, 'message' => 'Exception: ' . $e->getMessage()];
+        }
+    }
+}

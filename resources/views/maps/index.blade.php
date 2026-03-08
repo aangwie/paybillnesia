@@ -1,0 +1,277 @@
+@extends('layouts.app2')
+
+@section('title', 'Peta Persebaran Pelanggan')
+@section('header', 'Peta Pelanggan')
+@section('subheader', 'Lokasi persebaran pelanggan dan status koneksi.')
+
+@section('content')
+
+    <!-- Map Controls -->
+    <div class="mb-6 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+        <div
+            class="inline-flex items-center rounded-lg bg-white dark:bg-slate-800 p-2 shadow-sm border border-slate-200 dark:border-slate-700">
+            <label class="flex items-center cursor-pointer px-2">
+                <div class="flex items-center px-2">
+                    <span class="relative flex h-3 w-3 mr-2">
+                        <span
+                            class="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75"></span>
+                        <span class="relative inline-flex rounded-full h-3 w-3 bg-green-500"></span>
+                    </span>
+                    <span
+                        class="text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">Live</span>
+                </div>
+                <div class="h-6 w-px bg-slate-200 dark:bg-slate-700 mx-2"></div>
+                <label class="flex items-center cursor-pointer mr-3">
+                    <div class="relative">
+                        <input type="checkbox" id="switchMapRefresh" class="sr-only peer" checked>
+                        <div class="block bg-slate-200 dark:bg-slate-700 w-10 h-6 rounded-full transition-colors duration-300 peer-checked:bg-green-500"
+                            id="switchBg">
+                        </div>
+                        <div class="dot absolute left-1 top-1 bg-white w-4 h-4 rounded-full transition-transform duration-300 transform peer-checked:translate-x-4 shadow"
+                            id="switchDot"></div>
+                    </div>
+                    <span class="ml-2 text-sm font-medium text-slate-600 dark:text-slate-300">Auto</span>
+                </label>
+            </label>
+            <div class="h-6 w-px bg-slate-200 mx-2"></div>
+            <select id="selectMapInterval"
+                class="block w-24 rounded-md border-0 py-1.5 text-slate-900 dark:text-white dark:bg-slate-700 shadow-sm ring-1 ring-inset ring-slate-300 dark:ring-slate-600 focus:ring-2 focus:ring-inset focus:ring-primary-600 sm:text-xs sm:leading-6 cursor-pointer">
+                <option value="5">5 Detik</option>
+                <option value="15">15 Detik</option>
+                <option value="30">30 Detik</option>
+                <option value="60">1 Menit</option>
+                <option value="180">3 Menit</option>
+            </select>
+            <div class="ml-3 hidden sm:flex items-center text-xs text-slate-400 dark:text-slate-500 font-mono">
+                <i class="fas fa-history mr-1.5"></i> <span id="mapTimerDisplay">--</span>s
+            </div>
+        </div>
+
+        <div class="flex gap-2">
+            <div class="flex items-center gap-2 bg-white px-3 py-1.5 rounded-lg border border-slate-200 shadow-sm">
+                <span class="h-2.5 w-2.5 rounded-full bg-green-500"></span>
+                <span class="text-xs font-semibold text-slate-600">Online</span>
+            </div>
+            <div class="flex items-center gap-2 bg-white px-3 py-1.5 rounded-lg border border-slate-200 shadow-sm">
+                <span class="h-2.5 w-2.5 rounded-full bg-red-500"></span>
+                <span class="text-xs font-semibold text-slate-600">Offline</span>
+            </div>
+        </div>
+    </div>
+
+    <!-- Map Container -->
+    <div class="bg-white rounded-2xl shadow-lg border border-slate-200 overflow-hidden relative h-[75vh]">
+        <div id="map" class="absolute inset-0 h-full w-full z-0"></div>
+    </div>
+
+@endsection
+
+@push('styles')
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <style>
+        /* Custom Switch - Handled by Tailwind peer classes */
+
+        /* Map Icons */
+        /* Elegant Map Pin */
+        .map-pin {
+            width: 40px;
+            height: 40px;
+            border-radius: 50% 50% 50% 0;
+            position: absolute;
+            transform: rotate(-45deg);
+            left: 50%;
+            top: 50%;
+            margin: -20px 0 0 -20px;
+            box-shadow: -2px 3px 6px rgba(0, 0, 0, 0.3);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.3s ease;
+        }
+
+        .map-pin.online {
+            background: #10b981;
+            /* Emerald 500 */
+        }
+
+        .map-pin.offline {
+            background: #f43f5e;
+            /* Rose 500 */
+        }
+
+        /* Inner White Circle */
+        .map-pin span {
+            width: 16px;
+            height: 16px;
+            background: #fff;
+            border-radius: 50%;
+            transform: rotate(45deg);
+            /* Counter-rotate to verify icon is upright */
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            box-shadow: inset 0 0 2px rgba(0, 0, 0, 0.1);
+        }
+
+        .map-pin span i {
+            font-size: 14px;
+        }
+
+        .map-pin:hover {
+            transform: rotate(-45deg) scale(1.1);
+            z-index: 1000;
+        }
+
+        /* Pulse for Online */
+        .map-pin.online::after {
+            content: '';
+            position: absolute;
+            width: 100%;
+            height: 100%;
+            border-radius: 50% 50% 50% 0;
+            background: rgba(16, 185, 129, 0.4);
+            top: 0;
+            left: 0;
+            z-index: -1;
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+            0% {
+                transform: scale(1);
+                opacity: 0.8;
+            }
+
+            70% {
+                transform: scale(1.6);
+                opacity: 0;
+            }
+
+            100% {
+                transform: scale(1);
+                opacity: 0;
+            }
+        }
+
+        /* Map Popup Tailwind-like Styling */
+        .leaflet-popup-content-wrapper {
+            @apply rounded-xl shadow-xl overflow-hidden p-0 !important;
+        }
+
+        .leaflet-popup-content {
+            @apply m-0 !important;
+        }
+
+        .leaflet-container a.leaflet-popup-close-button {
+            @apply text-slate-400 hover:text-slate-600 p-1 !important;
+        }
+    </style>
+@endpush
+
+@push('scripts')
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+    <script>
+        var map = L.map('map').setView([-2.5489, 118.0149], 5);
+
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            attribution: '&copy; OpenStreetMap contributors'
+        }).addTo(map);
+
+        var locations = @json($mapData);
+        var markers = [];
+
+        locations.forEach(function (loc) {
+            var markerStatus = (loc.status === 'online') ? 'online' : 'offline';
+            var iconColorClass = (loc.status === 'online') ? 'text-emerald-600' : 'text-rose-600';
+
+            var statusBadge = (loc.status === 'online') ?
+                '<span class="inline-flex items-center rounded-full bg-green-50 px-2 py-0.5 text-xs font-medium text-green-700 ring-1 ring-inset ring-green-600/20">ONLINE</span>' :
+                '<span class="inline-flex items-center rounded-full bg-red-50 px-2 py-0.5 text-xs font-medium text-red-700 ring-1 ring-inset ring-red-600/10">OFFLINE</span>';
+
+            var customIcon = L.divIcon({
+                className: 'bg-transparent border-0',
+                html: `<div class="map-pin ${markerStatus}"><span><i class="fas fa-wifi ${iconColorClass}"></i></span></div>`,
+                iconSize: [40, 40],
+                iconAnchor: [20, 40], // Center bottom
+                popupAnchor: [0, -45] // Above pin
+            });
+
+            var marker = L.marker([loc.lat, loc.lng], { icon: customIcon }).addTo(map);
+
+            var popupContent = `
+                                    <div class="px-4 py-3 bg-white min-w-[200px]">
+                                        <div class="text-center mb-3">
+                                            <h6 class="text-sm font-bold text-slate-800 mb-1 leading-tight">${loc.name}</h6>
+                                            ${statusBadge}
+                                        </div>
+                                        <div class="space-y-1.5 border-t border-slate-100 pt-2">
+                                            <div class="flex items-start text-xs text-slate-500">
+                                                <i class="fas fa-user-circle mt-0.5 mr-2 text-slate-400"></i>
+                                                <span class="font-mono text-slate-700">${loc.username}</span>
+                                            </div>
+                                            <div class="flex items-start text-xs text-slate-500">
+                                                <i class="fas fa-map-marker-alt mt-0.5 mr-2 text-slate-400"></i>
+                                                <span>${loc.address ? loc.address.substring(0, 30) + '...' : '-'}</span>
+                                            </div>
+                                        </div>
+                                        <div class="mt-3 pt-2">
+                                            <a href="https://wa.me/${loc.phone}" target="_blank" class="flex w-full justify-center items-center rounded-md bg-green-50 px-2 py-1.5 text-xs font-bold text-green-700 hover:bg-green-100 transition-colors">
+                                                <i class="fab fa-whatsapp mr-1.5"></i> Chat WhatsApp
+                                            </a>
+                                        </div>
+                                    </div>
+                                `;
+
+            marker.bindPopup(popupContent);
+            marker.on('mouseover', function (e) {
+                this.openPopup();
+            });
+            markers.push(marker);
+        });
+
+        if (markers.length > 0) {
+            var group = new L.featureGroup(markers);
+            map.fitBounds(group.getBounds().pad(0.2), { maxZoom: 50 });
+        }
+
+        // Auto Refresh Logic
+        let savedMapInterval = localStorage.getItem('map_refresh_interval') || 30;
+        let savedMapStatus = localStorage.getItem('map_refresh_active');
+        let isMapRefreshOn = (savedMapStatus === 'false') ? false : true;
+
+        document.getElementById('selectMapInterval').value = savedMapInterval;
+        document.getElementById('switchMapRefresh').checked = isMapRefreshOn;
+
+        let mapTimeLeft = parseInt(savedMapInterval);
+        let mapTimerElem = document.getElementById('mapTimerDisplay');
+        let mapIntervalId;
+
+        function startMapTimer() {
+            if (mapIntervalId) clearInterval(mapIntervalId);
+            if (!isMapRefreshOn) { mapTimerElem.innerHTML = "OFF"; return; }
+            mapTimerElem.innerHTML = mapTimeLeft;
+
+            mapIntervalId = setInterval(function () {
+                if (mapTimeLeft <= 0) window.location.reload();
+                else { mapTimeLeft--; mapTimerElem.innerHTML = mapTimeLeft; }
+            }, 1000);
+        }
+
+        document.getElementById('switchMapRefresh').addEventListener('change', function () {
+            isMapRefreshOn = this.checked;
+            localStorage.setItem('map_refresh_active', isMapRefreshOn);
+            if (isMapRefreshOn) { mapTimeLeft = parseInt(document.getElementById('selectMapInterval').value); startMapTimer(); }
+            else { clearInterval(mapIntervalId); mapTimerElem.innerHTML = "OFF"; }
+        });
+
+        document.getElementById('selectMapInterval').addEventListener('change', function () {
+            let newVal = this.value;
+            localStorage.setItem('map_refresh_interval', newVal);
+            mapTimeLeft = parseInt(newVal);
+            if (isMapRefreshOn) mapTimerElem.innerHTML = mapTimeLeft;
+        });
+
+        startMapTimer();
+    </script>
+@endpush
