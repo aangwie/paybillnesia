@@ -129,8 +129,12 @@ class DashboardController extends Controller
             $dbVersion = 'Unknown';
         }
 
-        // ── System Monitor (Realtime) ──
-        $systemStats = $this->getSystemMonitorStats();
+        // System stats loaded via AJAX (getStatsJson) for faster page render
+        $systemStats = [
+            'cpu_load' => 0, 'ram_total' => 0, 'ram_used' => 0,
+            'ram_percentage' => 0, 'disk_total' => 0, 'disk_used' => 0,
+            'disk_percentage' => 0, 'net_rx' => 0, 'net_tx' => 0,
+        ];
 
         return view('dashboard.index', compact(
             'totalCustomers',

@@ -11,9 +11,21 @@ use App\Models\RouterSetting;
 class MikrotikService
 {
     protected $client;
+    protected $initialized = false;
 
     public function __construct()
     {
+        // Lazy: don't connect here, defer until first usage
+    }
+
+    /**
+     * Lazily initialize the connection when first needed.
+     */
+    protected function ensureConnected()
+    {
+        if ($this->initialized) return;
+        $this->initialized = true;
+
         try {
             // AMBIL YANG STATUSNYA AKTIF
             $config = RouterSetting::where('is_active', true)->first();
@@ -33,7 +45,7 @@ class MikrotikService
                 'user' => $config->username,
                 'pass' => $config->password,
                 'port' => (int) $config->port,
-                'timeout' => 5, // Reduced timeout for better UX
+                'timeout' => 5,
             ]);
         } catch (\Throwable $e) {
             $this->client = null;
@@ -43,6 +55,7 @@ class MikrotikService
     // Cek status koneksi
     public function isConnected()
     {
+        $this->ensureConnected();
         return $this->client !== null;
     }
 
