@@ -396,4 +396,48 @@ class MikrotikService
         }
         return false;
     }
+
+    // --- IDENTITY & CONNECTION CHECK ---
+
+    /**
+     * Get MikroTik identity name from current connection
+     */
+    public function getIdentity()
+    {
+        if (!$this->isConnected())
+            return null;
+
+        try {
+            $query = new Query('/system/identity/print');
+            $result = $this->client->query($query)->read();
+            return !empty($result) ? ($result[0]['name'] ?? null) : null;
+        } catch (\Throwable $e) {
+            return null;
+        }
+    }
+
+    /**
+     * Static method to check connection to a specific router and get its identity.
+     * Returns ['connected' => bool, 'identity' => string|null]
+     */
+    public static function checkRouterConnection($host, $user, $pass, $port = 8728)
+    {
+        try {
+            $client = new Client([
+                'host' => $host,
+                'user' => $user,
+                'pass' => $pass,
+                'port' => (int) $port,
+                'timeout' => 3,
+            ]);
+
+            $query = new Query('/system/identity/print');
+            $result = $client->query($query)->read();
+            $identity = !empty($result) ? ($result[0]['name'] ?? null) : null;
+
+            return ['connected' => true, 'identity' => $identity];
+        } catch (\Throwable $e) {
+            return ['connected' => false, 'identity' => null];
+        }
+    }
 }

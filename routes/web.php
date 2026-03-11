@@ -168,6 +168,7 @@ Route::middleware(['auth'])->group(function () {
         Route::post('/router-setting', [RouterSettingController::class, 'store'])->name('router.store'); // Create & Update
         Route::post('/router-setting/activate/{id}', [RouterSettingController::class, 'activate'])->name('router.activate');
         Route::delete('/router-setting/{id}', [RouterSettingController::class, 'destroy'])->name('router.destroy');
+        Route::get('/router-setting/check-connection/{id}', [RouterSettingController::class, 'checkConnection'])->name('router.checkConnection');
 
         Route::get('/paket-plan', [PlanController::class, 'publicIndex'])->name('plans.public');
         Route::post('/paket-plan/checkout', [SubscriptionController::class, 'checkout'])->name('plans.checkout');

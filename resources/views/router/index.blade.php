@@ -130,11 +130,17 @@
                                 <th scope="col"
                                     class="px-6 py-3 text-left text-xs font-semibold text-slate-500 dark:text-slate-300 uppercase tracking-wider">
                                     Host & Port</th>
+                                <th scope="col"
+                                    class="px-6 py-3 text-left text-xs font-semibold text-slate-500 dark:text-slate-300 uppercase tracking-wider">
+                                    Koneksi</th>
                                 <th scope="col" class="relative px-6 py-3 text-right text-slate-500 dark:text-slate-300">Aksi</th>
                             </tr>
                         </thead>
                         <tbody class="bg-white dark:bg-slate-800 divide-y divide-slate-200 dark:divide-slate-700">
                             @foreach($routers as $r)
+                                @php
+                                    $isOwner = ($r->admin_id == auth()->id()) || (auth()->user()->isSuperAdmin() && $r->admin_id === null);
+                                @endphp
                                 <tr class="{{ $r->is_active ? 'bg-indigo-50/50 dark:bg-indigo-900/20' : '' }}">
                                     <td class="px-6 py-4 whitespace-nowrap">
                                         @if($r->is_active)
@@ -157,8 +163,17 @@
                                         <div class="text-sm text-slate-900 dark:text-white">{{ $r->host }}:{{ $r->port }}</div>
                                         <div class="text-xs text-slate-500 dark:text-slate-400">User: {{ $r->username }}</div>
                                     </td>
+                                    {{-- Connection Status Column (loaded via AJAX) --}}
+                                    <td class="px-6 py-4 whitespace-nowrap" id="conn-status-{{ $r->id }}">
+                                        <div class="flex items-center gap-2">
+                                            <span class="relative flex h-2.5 w-2.5">
+                                                <span class="animate-pulse relative inline-flex rounded-full h-2.5 w-2.5 bg-slate-300 dark:bg-slate-600"></span>
+                                            </span>
+                                            <div class="text-xs font-medium text-slate-400 dark:text-slate-500 animate-pulse">Checking...</div>
+                                        </div>
+                                    </td>
                                     <td class="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
-                                        @if(auth()->user()->is_activated || auth()->user()->isSuperAdmin())
+                                        @if($isOwner && (auth()->user()->is_activated || auth()->user()->isSuperAdmin()))
                                             <div class="flex justify-end gap-2">
                                                 @if(!$r->is_active)
                                                     <form action="{{ route('router.activate', $r->id) }}" method="POST">
@@ -186,9 +201,13 @@
                                                         </button>
                                                     </form>
                                                 @else
-                                                    <button class="p-1.5 rounded-md text-slate-300 cursor-not-allowed" disabled><i
+                                                    <button class="p-1.5 rounded-md text-slate-300 cursor-not-allowed" disabled title="Router aktif tidak bisa dihapus"><i
                                                             class="fas fa-trash-alt"></i></button>
                                                 @endif
+                                            </div>
+                                        @elseif(!$isOwner)
+                                            <div class="text-slate-400 dark:text-slate-500 text-xs italic">
+                                                <i class="fas fa-eye text-[10px] mr-1"></i> View Only
                                             </div>
                                         @else
                                             <div class="text-slate-400 dark:text-slate-600 text-xs italic">
@@ -239,6 +258,63 @@
             btnSave.classList.remove('bg-amber-600', 'hover:bg-amber-500');
 
             document.getElementById('btnCancel').classList.add('hidden');
+        }
+
+        // AJAX: Check connection status for each router asynchronously
+        document.addEventListener('DOMContentLoaded', function () {
+            const routerIds = @json($routers->pluck('id'));
+
+            routerIds.forEach(function (id, index) {
+                // Stagger requests by 200ms to avoid hammering the server
+                setTimeout(function () {
+                    fetch("{{ url('/router-setting/check-connection') }}/" + id, {
+                        headers: { 'X-Requested-With': 'XMLHttpRequest' }
+                    })
+                    .then(response => response.json())
+                    .then(data => {
+                        const cell = document.getElementById('conn-status-' + id);
+                        if (!cell) return;
+
+                        if (data.connected) {
+                            let identityHtml = '';
+                            if (data.identity) {
+                                identityHtml = '<div class="text-[10px] text-slate-500 dark:text-slate-400 font-mono">' + escapeHtml(data.identity) + '</div>';
+                            }
+                            cell.innerHTML = '<div class="flex items-center gap-2">' +
+                                '<span class="relative flex h-2.5 w-2.5">' +
+                                    '<span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>' +
+                                    '<span class="relative inline-flex rounded-full h-2.5 w-2.5 bg-emerald-500"></span>' +
+                                '</span>' +
+                                '<div>' +
+                                    '<div class="text-xs font-semibold text-emerald-600 dark:text-emerald-400">Connected</div>' +
+                                    identityHtml +
+                                '</div></div>';
+                        } else {
+                            cell.innerHTML = '<div class="flex items-center gap-2">' +
+                                '<span class="relative flex h-2.5 w-2.5">' +
+                                    '<span class="relative inline-flex rounded-full h-2.5 w-2.5 bg-red-500"></span>' +
+                                '</span>' +
+                                '<div class="text-xs font-semibold text-red-500 dark:text-red-400">Disconnected</div></div>';
+                        }
+                    })
+                    .catch(() => {
+                        const cell = document.getElementById('conn-status-' + id);
+                        if (cell) {
+                            cell.innerHTML = '<div class="flex items-center gap-2">' +
+                                '<span class="relative flex h-2.5 w-2.5">' +
+                                    '<span class="relative inline-flex rounded-full h-2.5 w-2.5 bg-amber-400"></span>' +
+                                '</span>' +
+                                '<div class="text-xs font-semibold text-amber-500 dark:text-amber-400">Error</div></div>';
+                        }
+                    });
+                }, index * 200);
+            });
+        });
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.appendChild(document.createTextNode(text));
+            return div.innerHTML;
         }
     </script>
 
