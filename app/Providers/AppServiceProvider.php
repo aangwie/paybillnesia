@@ -6,7 +6,6 @@ use Illuminate\Support\ServiceProvider;
 use Illuminate\Support\Facades\View;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Facades\URL;
-use Illuminate\Support\Facades\Cache;
 use App\Models\Company;
 use App\Models\SiteSetting;
 use Illuminate\Support\Facades\Event;
@@ -22,48 +21,45 @@ class AppServiceProvider extends ServiceProvider
 
     public function boot(): void
     {
-        if (!app()->runningInConsole()) {
-            // LOGIKA FAVICON GLOBAL — cached for 60 minutes
-            $companyData = Cache::remember('global_company_data', 3600, function () {
-                if (!Schema::hasTable('companies')) {
-                    return ['favicon' => asset('favicon.ico'), 'company' => null];
+        // LOGIKA FAVICON GLOBAL
+        // Cek dulu apakah tabel companies sudah ada dan aplikasi tidak sedang berjalan di console (migrate, dsb)
+        // Agar tidak error saat migrate fresh atau saat kolom belum ada
+        if (!app()->runningInConsole() && Schema::hasTable('companies')) {
+            $company = null;
+
+            // Cek apakah kolom admin_id sudah ada (karena ditambahkan lewat migrasi)
+            if (Schema::hasColumn('companies', 'admin_id')) {
+                // Kita ambil company milik user yang punya role superadmin
+                // Use withoutGlobalScopes to bypass TenantScope for this global view share
+                $company = Company::withoutGlobalScopes()->whereHas('admin', function ($q) {
+                    $q->where('role', 'superadmin');
+                })->first();
+            }
+
+            // Jika tidak ada (mungkin belum set atau kolom belum ada), ambil yang pertama saja
+            if (!$company) {
+                $company = Company::withoutGlobalScopes()->first();
+            }
+
+            // Jika ada logo di database, pakai itu. Jika tidak, pakai default laravel (favicon.ico)
+            $faviconUrl = ($company && $company->logo_path)
+                ? asset('uploads/' . $company->logo_path)
+                : asset('favicon.ico');
+
+            // Bagikan variable $global_favicon dan $company ke semua view
+            View::share('global_favicon', $faviconUrl);
+            View::share('company', $company);
+        }
+
+        // Force HTTPS or HTTP based on SiteSetting
+        if (!app()->runningInConsole() && Schema::hasTable('site_settings')) {
+            $setting = SiteSetting::first();
+            if ($setting) {
+                if ($setting->connection_mode === 'https') {
+                    URL::forceScheme('https');
+                } elseif ($setting->connection_mode === 'http') {
+                    URL::forceScheme('http');
                 }
-
-                $company = null;
-
-                if (Schema::hasColumn('companies', 'admin_id')) {
-                    $company = Company::whereHas('admin', function ($q) {
-                        $q->where('role', 'superadmin');
-                    })->first();
-                }
-
-                if (!$company) {
-                    $company = Company::first();
-                }
-
-                $faviconUrl = ($company && $company->logo_path)
-                    ? asset('uploads/' . $company->logo_path)
-                    : asset('favicon.ico');
-
-                return ['favicon' => $faviconUrl, 'company' => $company];
-            });
-
-            View::share('global_favicon', $companyData['favicon']);
-            View::share('company', $companyData['company']);
-
-            // Force HTTPS or HTTP based on SiteSetting — cached for 60 minutes
-            $connectionMode = Cache::remember('site_connection_mode', 3600, function () {
-                if (!Schema::hasTable('site_settings')) {
-                    return null;
-                }
-                $setting = SiteSetting::first();
-                return $setting ? $setting->connection_mode : null;
-            });
-
-            if ($connectionMode === 'https') {
-                URL::forceScheme('https');
-            } elseif ($connectionMode === 'http') {
-                URL::forceScheme('http');
             }
         }
 

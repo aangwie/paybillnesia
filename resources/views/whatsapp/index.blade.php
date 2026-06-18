@@ -91,10 +91,11 @@
                                     </div>
                                     <div>
                                         <label class="block text-sm font-bold text-slate-900 mb-1">API Key
-                                            (Provider)</label>
-                                        <input type="text" name="api_key"
+                                            External</label>
+                                        <input type="text" name="api_key_external"
                                             class="block w-full rounded-md border-0 py-1.5 text-slate-900 shadow-sm ring-1 ring-inset ring-slate-300 placeholder:text-slate-400 focus:ring-2 focus:ring-inset focus:ring-indigo-600 sm:text-sm sm:leading-6"
-                                            placeholder="Provider API Key" value="{{ optional($setting)->api_key ?? '' }}">
+                                            placeholder="API Key dari penyedia pihak ke-3"
+                                            value="{{ optional($setting)->api_key_external ?? '' }}">
                                     </div>
                                     <div>
                                         <label class="block text-sm font-bold text-slate-900 mb-1">Nomor Pengirim</label>
@@ -107,50 +108,151 @@
 
                             <!-- Self-Gateway Fields -->
                             <template x-if="waProvider === 'gateway'">
-                                <div class="space-y-4" x-data="whatsappGateway()">
+                                <div class="space-y-4" x-data="whatsappGateway()" x-init="init()" x-on:destroy="destroy()">
                                     <div>
                                         <label class="block text-sm font-bold text-slate-900 mb-1">Gateway URL
-                                            (Local)</label>
-                                        <input type="url" name="wa_gateway_url"
-                                            class="block w-full rounded-md border-0 py-1.5 text-slate-900 shadow-sm ring-1 ring-inset ring-slate-300 placeholder:text-slate-400 focus:ring-2 focus:ring-inset focus:ring-emerald-600 sm:text-sm sm:leading-6"
-                                            placeholder="http://localhost:3000"
-                                            value="{{ optional($setting)->wa_gateway_url ?? 'http://localhost:3000' }}">
-                                        <p class="mt-1 text-[10px] text-slate-500">Gunakan localhost:3000 jika gateway di
-                                            server yang sama.</p>
+                                            (Control)</label>
+                                        @if(auth()->user()->role == 'superadmin')
+                                            <input type="url" name="wa_gateway_url"
+                                                class="block w-full rounded-md border-0 py-1.5 text-slate-900 shadow-sm ring-1 ring-inset ring-slate-300 placeholder:text-slate-400 focus:ring-2 focus:ring-inset focus:ring-emerald-600 sm:text-sm sm:leading-6"
+                                                placeholder="http://localhost:3000"
+                                                value="{{ optional($setting)->wa_gateway_url ?? 'http://localhost:3000' }}">
+                                        @else
+                                            @php
+                                                $saSetting = \App\Models\WhatsappSetting::withoutGlobalScopes()->where('admin_id', 1)->first(); // Assuming ID 1 is SA or filter by role
+                                                if (!$saSetting) {
+                                                    $saSetting = \App\Models\WhatsappSetting::withoutGlobalScopes()->whereHas('admin', function ($q) {
+                                                        $q->where('role', 'superadmin');
+                                                    })->first();
+                                                }
+                                                $effectiveUrl = optional($setting)->wa_gateway_url ?? ($saSetting->wa_gateway_url ?? 'http://localhost:3000');
+                                            @endphp
+                                            <div
+                                                class="flex items-center gap-2 px-3 py-2 bg-slate-50 border border-slate-200 rounded-md text-sm text-slate-600">
+                                                <i class="fas fa-link text-slate-400"></i>
+                                                <span>{{ $effectiveUrl }}</span>
+                                                <span
+                                                    class="ml-auto text-[10px] bg-indigo-100 text-indigo-700 px-1.5 py-0.5 rounded font-bold uppercase">Global
+                                                    URL</span>
+                                            </div>
+                                            <input type="hidden" name="wa_gateway_url"
+                                                value="{{ optional($setting)->wa_gateway_url }}">
+                                        @endif
+                                        <p class="mt-1 text-[10px] text-slate-500">
+                                            @if(auth()->user()->role == 'superadmin')
+                                                URL ini akan digunakan sebagai default untuk semua admin jika mereka tidak
+                                                menentukan sendiri.
+                                            @else
+                                                Gateway URL dikelola oleh Superadmin untuk memastikan kestabilan koneksi.
+                                            @endif
+                                        </p>
+                                    </div>
+
+                                    <div>
+                                        <label class="block text-sm font-bold text-slate-900 mb-1">Gateway API Key
+                                            (Self)</label>
+                                        <div class="flex gap-2">
+                                            <input type="text" name="api_key_gateway" id="gatewayApiKey"
+                                                class="block w-full rounded-md border-0 py-1.5 text-slate-900 shadow-sm ring-1 ring-inset ring-slate-300 bg-slate-50 placeholder:text-slate-400 focus:ring-2 focus:ring-inset focus:ring-emerald-600 sm:text-sm sm:leading-6"
+                                                placeholder="Unique Gateway Key"
+                                                value="{{ optional($setting)->api_key_gateway ?? '' }}" readonly>
+                                            <button type="button" onclick="copyGatewayKey()"
+                                                class="inline-flex items-center px-3 py-1.5 border border-transparent text-xs font-bold rounded-md text-indigo-700 bg-indigo-100 hover:bg-indigo-200 transition-all shadow-sm"
+                                                title="Salin API Key">
+                                                <i class="fas fa-copy" id="copyKeyIcon"></i>
+                                            </button>
+                                            <button type="button" onclick="regenerateGatewayKey()"
+                                                class="inline-flex items-center px-3 py-1.5 border border-transparent text-xs font-bold rounded-md text-emerald-700 bg-emerald-100 hover:bg-emerald-200 transition-all shadow-sm">
+                                                <i class="fas fa-sync-alt mr-1"></i> Ganti
+                                            </button>
+                                        </div>
+                                        <p class="mt-1 text-[10px] text-slate-500 italic">API Key ini digunakan oleh gateway
+                                            Anda untuk otentikasi.</p>
                                     </div>
 
                                     <!-- Gateway Connection Panel -->
-                                    <div class="mt-4 border border-emerald-100 rounded-xl bg-emerald-50/30 overflow-hidden">
-                                        <div class="bg-emerald-500 px-4 py-2 flex items-center justify-between">
-                                            <span class="text-xs font-bold text-white uppercase tracking-wider">Status
-                                                Gateway</span>
-                                            <span
-                                                class="flex items-center gap-1.5 text-[10px] font-black text-white bg-white/20 px-2 py-0.5 rounded-full">
-                                                <span class="h-2 w-2 rounded-full" :class="{
-                                                            'bg-white': status === 'connected',
-                                                            'bg-amber-300': status === 'connecting',
-                                                            'bg-red-300': status === 'disconnected'
-                                                        }"></span>
-                                                <span x-text="status.toUpperCase()"></span>
-                                            </span>
+                                    <div class="mt-4 border rounded-xl overflow-hidden transition-all duration-300" :class="{
+                                                                                        'border-emerald-100 bg-emerald-50/10': reachable,
+                                                                                        'border-red-100 bg-red-50/10': !reachable
+                                                                                    }">
+                                        <div class="px-4 py-2 flex items-center justify-between transition-colors duration-300"
+                                            :class="{
+                                                                                            'bg-emerald-500': reachable,
+                                                                                            'bg-red-500': !reachable
+                                                                                        }">
+                                            <div class="flex flex-col">
+                                                <span
+                                                    class="text-[10px] font-bold text-white/80 uppercase tracking-widest leading-none mb-1">Status
+                                                    Gateway</span>
+                                                <span class="text-xs font-black text-white uppercase"
+                                                    x-text="reachable ? 'Online' : 'Offline'"></span>
+                                            </div>
+                                            <div class="flex flex-col items-end">
+                                                <div
+                                                    class="flex items-center gap-1.5 text-[10px] font-black text-white bg-white/20 px-2 py-0.5 rounded-full mb-1">
+                                                    <span class="h-2 w-2 rounded-full animate-pulse" :class="{
+                                                                                                    'bg-white': status === 'connected',
+                                                                                                    'bg-emerald-300': status === 'qr',
+                                                                                                    'bg-amber-300': status === 'connecting',
+                                                                                                    'bg-red-300': status === 'disconnected' || !reachable
+                                                                                                }"></span>
+                                                    <span x-text="status.toUpperCase()"></span>
+                                                </div>
+                                                <span class="text-[9px] text-white/70 font-mono" x-text="lastUpdate"></span>
+                                            </div>
                                         </div>
                                         <div class="p-4 flex flex-col items-center">
-                                            <!-- QR Code Display -->
-                                            <template x-if="status === 'connecting' && qr">
+                                            <!-- QR Code Display (Show if QR exists and not connected) -->
+                                            <template x-if="qr && status !== 'connected'">
                                                 <div
-                                                    class="mb-4 bg-white p-3 rounded-xl shadow-inner border border-emerald-100 animate-fade-in text-center">
+                                                    class="mb-4 bg-white p-3 rounded-xl shadow-inner border border-emerald-100 animate-fade-in text-center w-full">
                                                     <p
                                                         class="text-[10px] font-bold text-emerald-600 mb-2 uppercase italic tracking-widest">
                                                         Pindai QR untuk Menghubungkan</p>
-                                                    <img :src="qr" class="w-48 h-48 mx-auto" />
+                                                    <div
+                                                        class="bg-white p-2 rounded-lg inline-block border border-slate-100 shadow-sm">
+                                                        <img :src="qr" class="w-48 h-48 mx-auto" alt="WhatsApp QR Code" />
+                                                    </div>
+                                                    <p class="mt-2 text-[10px] text-slate-400">QR Code akan diperbarui
+                                                        secara berkala</p>
+                                                    <button type="button" @click="logout()"
+                                                        class="mt-2 text-[10px] font-bold text-red-500 hover:text-red-700 underline uppercase tracking-widest">
+                                                        <i class="fas fa-sign-out-alt mr-1"></i> Putuskan Koneksi
+                                                    </button>
                                                 </div>
                                             </template>
 
-                                            <template x-if="status === 'connecting' && !qr">
-                                                <div class="py-12 text-center">
-                                                    <i class="fas fa-qrcode fa-3x text-emerald-200 mb-2"></i>
-                                                    <p class="text-xs text-emerald-600 font-bold">Menghubungkan ke
-                                                        Gateway...</p>
+                                            <template x-if="reachable && !qr && status !== 'connected'">
+                                                <div class="py-12 text-center w-full">
+                                                    <div class="relative inline-block mb-3">
+                                                        <i class="fas fa-qrcode fa-4x text-emerald-100"></i>
+                                                        <div class="absolute inset-0 flex items-center justify-center">
+                                                            <i class="fas fa-spinner fa-spin text-emerald-500 text-xl"></i>
+                                                        </div>
+                                                    </div>
+                                                    <p class="text-sm text-emerald-600 font-bold">Inisialisasi WhatsApp...
+                                                    </p>
+                                                    <div class="mt-2">
+                                                        <button type="button" @click="logout()"
+                                                            class="text-[10px] font-bold text-red-500 hover:text-red-700 underline uppercase tracking-widest">
+                                                            <i class="fas fa-sign-out-alt mr-1"></i> Putuskan Koneksi
+                                                        </button>
+                                                        <p class="text-[10px] text-slate-400 mt-1">Gunakan tombol di atas
+                                                            jika inisialisasi terlalu lama.</p>
+                                                    </div>
+                                                </div>
+                                            </template>
+
+                                            <template x-if="!reachable">
+                                                <div class="py-12 text-center w-full">
+                                                    <div class="mb-3">
+                                                        <i class="fas fa-wifi-slash fa-3x text-red-200"></i>
+                                                    </div>
+                                                    <p class="text-sm text-red-600 font-bold uppercase">Gateway Tidak
+                                                        Terjangkau</p>
+                                                    <p class="text-[10px] text-slate-500 mt-1 px-4 leading-relaxed"
+                                                        x-text="errorMessage || 'Gagal terhubung ke host gateway. Pastikan URL benar dan servis berjalan.'">
+                                                    </p>
                                                 </div>
                                             </template>
 
@@ -171,6 +273,33 @@
                                                     </button>
                                                 </div>
                                             </template>
+
+                                            <!-- Terminal Log Simulator -->
+                                            <div
+                                                class="mt-4 w-full border border-slate-900 rounded-lg overflow-hidden bg-black shadow-2xl">
+                                                <div class="bg-slate-800 px-3 py-1 flex items-center justify-between">
+                                                    <div class="flex gap-1">
+                                                        <div class="w-2.5 h-2.5 rounded-full bg-red-500"></div>
+                                                        <div class="w-2.5 h-2.5 rounded-full bg-amber-500"></div>
+                                                        <div class="w-2.5 h-2.5 rounded-full bg-emerald-500"></div>
+                                                    </div>
+                                                    <span
+                                                        class="text-[10px] font-mono text-slate-400 uppercase tracking-tighter">Gateway
+                                                        Terminal</span>
+                                                </div>
+                                                <div class="p-3 font-mono text-[10px] h-48 overflow-y-auto scrolling-touch flex flex-col font-medium"
+                                                    id="terminal-screen" x-ref="logsContainer">
+                                                    <template x-if="logs.length === 0">
+                                                        <div class="text-slate-500 italic">Listening for events...</div>
+                                                    </template>
+                                                    <template x-for="(log, index) in logs" :key="index">
+                                                        <div class="mb-1">
+                                                            <span class="text-emerald-400">[$]</span>
+                                                            <span class="text-slate-100" x-text="log"></span>
+                                                        </div>
+                                                    </template>
+                                                </div>
+                                            </div>
                                         </div>
                                     </div>
                                 </div>
@@ -299,36 +428,50 @@
                         </form>
                     </div>
 
-                    <!-- Tab: Unpaid Reminder -->
-                    <div x-show="activeTab === 'unpaid'" style="display: none;" x-data="{
-                                selectedTemplateId: '',
-                                previewContent: '',
-                                showSaveForm: false,
-                                templateName: '',
-                                selectTemplate(id) {
-                                    this.selectedTemplateId = id;
-                                    if (id) {
-                                        const option = document.querySelector('#billTemplateSelect option[value=\'' + id + '\']');
-                                        if (option) {
-                                            this.previewContent = option.dataset.content;
-                                            document.getElementById('msgUnpaid').value = option.dataset.content;
-                                        }
-                                    } else {
-                                        this.previewContent = '';
-                                        document.getElementById('msgUnpaid').value = '';
-                                    }
-                                }
-                            }">
+                    <!-- Tab: Unpaid Reminder (Enhanced with Scheduling) -->
+                    <div id="unpaidTab" x-show="activeTab === 'unpaid'" style="display: none;" x-data="{
+                                                                                                                            selectedTemplateId: '',
+                                                                                                                            previewContent: '',
+                                                                                                                            showSaveForm: false,
+                                                                                                                            templateName: '',
+                                                                                                                            whatsappAge: '12+',
+                                                                                                                            scheduleMode: 'now',
+                                                                                                                            scheduledAt: '',
+                                                                                                                            maxRecipients: 9999,
+                                                                                                                            getMaxRecipients() {
+                                                                                                                                if (this.whatsappAge === '1-6') return 15;
+                                                                                                                                if (this.whatsappAge === '6-12') return 50;
+                                                                                                                                return 9999;
+                                                                                                                            },
+                                                                                                                            updateLimit() {
+                                                                                                                                this.maxRecipients = this.getMaxRecipients();
+                                                                                                                            },
+                                                                                                                            selectTemplate(id) {
+                                                                                                                                this.selectedTemplateId = id;
+                                                                                                                                if (id) {
+                                                                                                                                    const option = document.querySelector('#billTemplateSelect option[value=\'' + id + '\']');
+                                                                                                                                    if (option) {
+                                                                                                                                        this.previewContent = option.dataset.content;
+                                                                                                                                        document.getElementById('msgUnpaid').value = option.dataset.content;
+                                                                                                                                    }
+                                                                                                                                } else {
+                                                                                                                                    this.previewContent = '';
+                                                                                                                                    document.getElementById('msgUnpaid').value = '';
+                                                                                                                                }
+                                                                                                                            }
+                                                                                                                        }"
+                        x-init="updateLimit()">
                         <div class="bg-amber-50 border-l-4 border-amber-400 p-4 mb-6 rounded-r-lg">
                             <div class="flex">
                                 <div class="flex-shrink-0"><i class="fas fa-exclamation-triangle text-amber-400"></i></div>
                                 <div class="ml-3">
                                     <p class="text-sm text-amber-700">Kirim pengingat otomatis ke semua pelanggan yang
-                                        status tagihannya <b>BELUM LUNAS</b> (Unpaid).</p>
+                                        status tagihannya <b>BELUM LUNAS</b> (Unpaid). Anda dapat mengirim langsung atau
+                                        menjadwalkan pengiriman.</p>
                                 </div>
                             </div>
                         </div>
-                        <div class="space-y-4">
+                        <div class="space-y-5">
                             @if(auth()->user()->role == 'superadmin')
                                 <div>
                                     <label class="block text-sm font-bold text-slate-900 mb-1">Filter Berdasarkan Admin</label>
@@ -401,7 +544,7 @@
                             <div>
                                 <label class="block text-sm font-bold text-slate-900 mb-1">Isi Pesan Template</label>
                                 <div class="relative">
-                                    <textarea id="msgUnpaid" rows="6"
+                                    <textarea id="msgUnpaid" rows="5"
                                         class="block w-full rounded-md border-0 py-1.5 text-slate-900 shadow-sm ring-1 ring-inset ring-slate-300 focus:ring-2 focus:ring-inset focus:ring-indigo-600 sm:text-sm sm:leading-6"
                                         x-on:input="previewContent = $event.target.value"
                                         placeholder="Halo {name}, tagihan internet Anda sebesar Rp {tagihan} belum terbayar...">Halo {name}, tagihan internet Anda sebesar Rp {tagihan} belum terbayar. Mohon segera lunasi.</textarea>
@@ -434,37 +577,93 @@
                                 </div>
                             </div>
 
+                            {{-- WhatsApp Age Selection --}}
+                            <div
+                                class="bg-gradient-to-r from-green-50 to-emerald-50 rounded-xl p-4 border border-green-200">
+                                <label class="block text-sm font-bold text-slate-900 mb-3">
+                                    <i class="fab fa-whatsapp mr-2 text-green-500"></i>Usia Nomor WhatsApp
+                                </label>
+                                <select x-model="whatsappAge" @change="updateLimit()"
+                                    class="block w-full rounded-lg border-0 py-2.5 px-3 text-slate-900 shadow-sm ring-1 ring-inset ring-green-300 focus:ring-2 focus:ring-inset focus:ring-green-500 sm:text-sm font-medium bg-white">
+                                    <option value="1-6">🆕 1-6 Bulan (Max 15 penerima)</option>
+                                    <option value="6-12">📅 6-12 Bulan (Max 50 penerima)</option>
+                                    <option value="12+">✅ 12+ Bulan (Unlimited)</option>
+                                </select>
+                                <p class="mt-2 text-xs text-green-700">
+                                    <i class="fas fa-shield-alt mr-1"></i>
+                                    Batasan untuk mencegah blokir WhatsApp pada nomor baru.
+                                </p>
+                            </div>
+
+                            {{-- Schedule Options --}}
+                            <div
+                                class="bg-gradient-to-r from-purple-50 to-indigo-50 rounded-xl p-4 border border-purple-200">
+                                <label class="block text-sm font-bold text-slate-900 mb-3">
+                                    <i class="fas fa-clock mr-2 text-purple-500"></i>Waktu Pengiriman
+                                </label>
+                                <div class="flex gap-4 mb-4">
+                                    <label class="flex items-center cursor-pointer group">
+                                        <input type="radio" x-model="scheduleMode" value="now"
+                                            class="w-4 h-4 text-purple-600 border-slate-300 focus:ring-purple-500">
+                                        <span class="ml-2 text-sm font-medium text-slate-700 group-hover:text-purple-600">
+                                            <i class="fas fa-bolt text-yellow-500 mr-1"></i>Kirim Sekarang
+                                        </span>
+                                    </label>
+                                    <label class="flex items-center cursor-pointer group">
+                                        <input type="radio" x-model="scheduleMode" value="scheduled"
+                                            class="w-4 h-4 text-purple-600 border-slate-300 focus:ring-purple-500">
+                                        <span class="ml-2 text-sm font-medium text-slate-700 group-hover:text-purple-600">
+                                            <i class="fas fa-calendar-alt text-purple-500 mr-1"></i>Jadwalkan
+                                        </span>
+                                    </label>
+                                </div>
+
+                                {{-- DateTime Picker --}}
+                                <div x-show="scheduleMode === 'scheduled'" x-transition class="mt-3">
+                                    <input type="datetime-local" x-model="scheduledAt" id="unpaidScheduledAtInput"
+                                        class="block w-full rounded-lg border-0 py-2.5 px-3 text-slate-900 shadow-sm ring-1 ring-inset ring-purple-300 focus:ring-2 focus:ring-inset focus:ring-purple-500 sm:text-sm font-medium bg-white">
+                                    <p class="mt-2 text-xs text-purple-700">
+                                        <i class="fas fa-info-circle mr-1"></i>
+                                        Pesan akan dikirim otomatis pada waktu yang ditentukan ke pelanggan yang masih
+                                        belum membayar tagihan.
+                                    </p>
+                                </div>
+                            </div>
+
                             {{-- Broadcast Button --}}
-                            <button onclick="prepareBroadcast('unpaid')"
-                                class="w-full inline-flex justify-center items-center rounded-lg bg-amber-500 px-4 py-3 text-sm font-bold text-white shadow-sm hover:bg-amber-600 hover:shadow-md transition-all">
-                                <i class="fab fa-whatsapp mr-2 text-lg"></i> Mulai Broadcast Reminder
+                            <button type="button" onclick="startUnpaidBroadcast()"
+                                class="w-full inline-flex justify-center items-center rounded-xl bg-gradient-to-r from-amber-500 to-orange-500 px-4 py-4 text-sm font-bold text-white shadow-lg hover:from-amber-600 hover:to-orange-600 hover:shadow-xl transition-all transform hover:scale-[1.02] active:scale-100">
+                                <i class="fab fa-whatsapp mr-2 text-lg"></i>
+                                <span
+                                    x-text="scheduleMode === 'now' ? 'Mulai Broadcast Reminder' : 'Jadwalkan Broadcast Reminder'"></span>
                             </button>
                         </div>
                     </div>
 
 
                     <!-- Tab: All Broadcast (Enhanced) -->
-                    <div id="broadcastTab" x-show="activeTab === 'broadcast'" style="display: none;" x-data="{
-                                                                    selectionMode: 'all',
-                                                                    whatsappAge: '12+',
-                                                                    scheduleMode: 'now',
-                                                                    selectedCustomers: [],
-                                                                    maxRecipients: 9999,
-                                                                    scheduledAt: '',
-                                                                    getMaxRecipients() {
-                                                                        if (this.whatsappAge === '1-6') return 15;
-                                                                        if (this.whatsappAge === '6-12') return 50;
-                                                                        return 9999;
-                                                                    },
-                                                                    updateLimit() {
-                                                                        this.maxRecipients = this.getMaxRecipients();
-                                                                        // Truncate selection if exceeds limit
-                                                                        if (this.selectedCustomers.length > this.maxRecipients) {
-                                                                            this.selectedCustomers = this.selectedCustomers.slice(0, this.maxRecipients);
-                                                                            $('#broadcastCustomerSelect').val(this.selectedCustomers).trigger('change');
-                                                                        }
-                                                                    }
-                                                                }" x-init="updateLimit()">
+                    <div id="broadcastTab" x-show="activeTab === 'broadcast'" style="display: none;"
+                        x-data="{
+                                                                                                                                                                selectionMode: 'all',
+                                                                                                                                                                whatsappAge: '12+',
+                                                                                                                                                                scheduleMode: 'now',
+                                                                                                                                                                selectedCustomers: [],
+                                                                                                                                                                maxRecipients: 9999,
+                                                                                                                                                                scheduledAt: '',
+                                                                                                                                                                getMaxRecipients() {
+                                                                                                                                                                    if (this.whatsappAge === '1-6') return 15;
+                                                                                                                                                                    if (this.whatsappAge === '6-12') return 50;
+                                                                                                                                                                    return 9999;
+                                                                                                                                                                },
+                                                                                                                                                                updateLimit() {
+                                                                                                                                                                    this.maxRecipients = this.getMaxRecipients();
+                                                                                                                                                                    // Truncate selection if exceeds limit
+                                                                                                                                                                    if (this.selectedCustomers.length > this.maxRecipients) {
+                                                                                                                                                                        this.selectedCustomers = this.selectedCustomers.slice(0, this.maxRecipients);
+                                                                                                                                                                        $('#broadcastCustomerSelect').val(this.selectedCustomers).trigger('change');
+                                                                                                                                                                    }
+                                                                                                                                                                }
+                                                                                                                                                            }" x-init="updateLimit()">
 
                         <div class="bg-blue-50 border-l-4 border-blue-400 p-4 mb-6 rounded-r-lg">
                             <div class="flex">
@@ -604,7 +803,7 @@
                     <!-- Tab: Queue -->
                     <div x-show="activeTab === 'queue'" style="display: none;">
                         <div class="overflow-hidden bg-white shadow sm:rounded-lg border border-slate-200 mt-4">
-                            <table class="min-w-full divide-y border-collapse divide-slate-300">
+                            <table id="queueTable" class="min-w-full divide-y border-collapse divide-slate-300">
                                 <thead class="bg-slate-50">
                                     <tr>
                                         <th scope="col"
@@ -625,28 +824,28 @@
                                     </tr>
                                 </thead>
                                 <tbody class="divide-y divide-slate-200 bg-white">
-                                    @forelse($scheduledMessages as $msg)
+                                    @foreach($scheduledMessages as $msg)
                                         <tr class="hover:bg-slate-50 transition-colors">
                                             <td
                                                 class="whitespace-nowrap py-4 pl-4 pr-3 text-sm text-slate-900 sm:pl-6 font-medium">
                                                 @if($msg->status === 'pending' && $msg->scheduled_at)
                                                     <div x-data="{ 
-                                                                                            target: new Date('{{ $msg->scheduled_at->toIso8601String() }}').getTime(),
-                                                                                            now: new Date().getTime(),
-                                                                                            countdown: '',
-                                                                                            update() {
-                                                                                                let diff = this.target - this.now;
-                                                                                                if (diff <= 0) {
-                                                                                                    this.countdown = 'Sesaat lagi...';
-                                                                                                    return;
-                                                                                                }
-                                                                                                let d = Math.floor(diff / (1000 * 60 * 60 * 24));
-                                                                                                let h = Math.floor((diff % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
-                                                                                                let m = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60));
-                                                                                                let s = Math.floor((diff % (1000 * 60)) / 1000);
-                                                                                                this.countdown = (d > 0 ? d + 'h ' : '') + h + 'j ' + m + 'm ' + s + 's';
-                                                                                            }
-                                                                                        }"
+                                                                                                                                                                                                                                                                                                                                                                            target: new Date('{{ $msg->scheduled_at->toIso8601String() }}').getTime(),
+                                                                                                                                                                                                                                                                                                                                                                            now: new Date().getTime(),
+                                                                                                                                                                                                                                                                                                                                                                            countdown: '',
+                                                                                                                                                                                                                                                                                                                                                                            update() {
+                                                                                                                                                                                                                                                                                                                                                                                let diff = this.target - this.now;
+                                                                                                                                                                                                                                                                                                                                                                                if (diff <= 0) {
+                                                                                                                                                                                                                                                                                                                                                                                    this.countdown = 'Sesaat lagi...';
+                                                                                                                                                                                                                                                                                                                                                                                    return;
+                                                                                                                                                                                                                                                                                                                                                                                }
+                                                                                                                                                                                                                                                                                                                                                                                let d = Math.floor(diff / (1000 * 60 * 60 * 24));
+                                                                                                                                                                                                                                                                                                                                                                                let h = Math.floor((diff % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
+                                                                                                                                                                                                                                                                                                                                                                                let m = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60));
+                                                                                                                                                                                                                                                                                                                                                                                let s = Math.floor((diff % (1000 * 60)) / 1000);
+                                                                                                                                                                                                                                                                                                                                                                                this.countdown = (d > 0 ? d + 'h ' : '') + h + 'j ' + m + 'm ' + s + 's';
+                                                                                                                                                                                                                                                                                                                                                                            }
+                                                                                                                                                                                                                                                                                                                                                                        }"
                                                         x-init="update(); setInterval(() => { now = new Date().getTime(); update() }, 1000)">
                                                         <div class="font-bold text-slate-900">
                                                             {{ $msg->scheduled_at->format('d M Y H:i') }}
@@ -663,14 +862,25 @@
                                                 @endif
                                             </td>
                                             <td class="whitespace-nowrap px-3 py-4 text-sm text-slate-500">
-                                                <div class="flex flex-col">
+                                                <div class="flex gap-1.5 mb-1">
                                                     <span
-                                                        class="inline-flex items-center w-fit rounded-md bg-indigo-50 px-2 py-1 text-xs font-bold text-indigo-700 ring-1 ring-inset ring-indigo-700/10">
-                                                        <i class="fas fa-users mr-1"></i> {{ $msg->total_count }} Nomor
+                                                        class="inline-flex items-center rounded-md bg-indigo-50 px-2 py-1 text-xs font-bold text-indigo-700 ring-1 ring-inset ring-indigo-700/10">
+                                                        <i class="fas fa-users mr-1"></i> {{ $msg->total_count }}
                                                     </span>
-                                                    <span class="text-[10px] text-slate-400 mt-1 font-medium">Age:
-                                                        <span class="text-indigo-600">{{ $msg->whatsapp_age }}</span></span>
+                                                    @if($msg->broadcast_type === 'unpaid')
+                                                        <span
+                                                            class="inline-flex items-center rounded-md bg-amber-50 px-2 py-1 text-xs font-bold text-amber-700 ring-1 ring-inset ring-amber-700/10">
+                                                            <i class="fas fa-file-invoice mr-1"></i> Tagihan
+                                                        </span>
+                                                    @else
+                                                        <span
+                                                            class="inline-flex items-center rounded-md bg-slate-50 px-2 py-1 text-xs font-bold text-slate-700 ring-1 ring-inset ring-slate-700/10">
+                                                            <i class="fas fa-bullhorn mr-1"></i> All
+                                                        </span>
+                                                    @endif
                                                 </div>
+                                                <span class="text-[10px] text-slate-400 font-medium">Age:
+                                                    <span class="text-indigo-600">{{ $msg->whatsapp_age }}</span></span>
                                             </td>
                                             <td class="px-3 py-4 text-sm text-slate-500">
                                                 <div class="max-w-xs break-words line-clamp-2" title="{{ $msg->message }}">
@@ -715,7 +925,8 @@
                                                             <i class="fas fa-exclamation-circle mr-1.5"></i> Gagal
                                                         </span>
                                                         <span class="text-[10px] text-red-500 font-bold"><i
-                                                                class="fas fa-times"></i> {{ $msg->failed_count }} Gagal</span>
+                                                                class="fas fa-times"></i>
+                                                            {{ $msg->failed_count }} Gagal</span>
                                                     </div>
                                                 @endif
                                             </td>
@@ -727,20 +938,7 @@
                                                 </button>
                                             </td>
                                         </tr>
-                                    @empty
-                                        <tr>
-                                            <td colspan="5" class="py-12 text-center">
-                                                <div class="flex flex-col items-center justify-center">
-                                                    <div
-                                                        class="inline-flex items-center justify-center h-12 w-12 rounded-full bg-slate-100 text-slate-400 mb-3">
-                                                        <i class="fas fa-calendar-times text-xl"></i>
-                                                    </div>
-                                                    <p class="text-sm font-medium text-slate-500 italic">Tidak ada antrean
-                                                        jadwal pesan.</p>
-                                                </div>
-                                            </td>
-                                        </tr>
-                                    @endforelse
+                                    @endforeach
                                 </tbody>
                             </table>
                         </div>
@@ -812,7 +1010,37 @@
 
 @push('styles')
     <link href="https://cdn.jsdelivr.net/npm/select2@4.1.0-rc.0/dist/css/select2.min.css" rel="stylesheet" />
+    <link rel="stylesheet" href="https://cdn.datatables.net/2.1.8/css/dataTables.tailwindcss.css">
     <style>
+        /* DataTables Custom Tailwind Styling */
+        .dataTables_wrapper .dataTables_length select {
+            @apply rounded-lg border-slate-300 py-1.5 pl-3 pr-8 text-sm focus:ring-indigo-500;
+        }
+
+        .dataTables_wrapper .dataTables_filter input {
+            @apply rounded-lg border-slate-300 py-1.5 px-3 text-sm focus:ring-indigo-500;
+        }
+
+        .dataTables_wrapper .dataTables_info {
+            @apply text-xs text-slate-500 font-medium;
+        }
+
+        .dataTables_wrapper .dt-paging-button {
+            @apply px-3 py-1 text-xs font-semibold rounded-md border border-slate-200 hover:bg-slate-50 transition-all;
+        }
+
+        .dataTables_wrapper .dt-paging-button.current {
+            @apply bg-indigo-600 text-white border-indigo-600 hover:bg-indigo-700;
+        }
+
+        table.dataTable thead th {
+            @apply border-b border-slate-200 bg-slate-50 py-3 text-left text-xs font-bold uppercase tracking-wider text-slate-900 !important;
+        }
+
+        table.dataTable td {
+            @apply py-4 px-3 text-sm text-slate-600 border-b border-slate-100 !important;
+        }
+
         /* Select2 Custom Tailwind-ish */
         .select2-container .select2-selection--multiple {
             min-height: 38px;
@@ -855,71 +1083,121 @@
         }
     </style>
     <script>
-            function whatsappGateway()               {
-                    return {
-                        status: 'disconnected',
-                        number: null,
-                        qr: null,
-                        polling: null,
+        function whatsappGateway() {
+            return {
+                status: 'disconnected',
+                reachable: true,
+                errorMessage: '',
+                lastUpdate: '',
+                number: null,
+                qr: null,
+                polling: null,
+                logPolling: null,
+                logs: [],
 
-                        init() {
-                            this.fetchStatus();
-                            this.polling = setInterval(() => this.fetchStatus(), 5000);
-                        },
+                init() {
+                    this.fetchStatus();
+                    this.fetchLogs();
+                    this.polling = setInterval(() => this.fetchStatus(), 5000);
+                    this.logPolling = setInterval(() => this.fetchLogs(), 3000);
+                },
 
-                        fetchStatus() {
-                            fetch('{{ route('whatsapp.gateway.status') }}')
-                                .then(res => res.json())
-                                .then(data => {
-                                    this.status = data.status;
-                                    this.qr = data.qr;
-                                    this.number = data.number;
-                                })
-                                .catch(err => {
-                                    this.status = 'disconnected';
-                                    this.qr = null;
-                                    this.number = null;
+                fetchStatus() {
+                    fetch('{{ route('whatsapp.gateway.status') }}')
+                        .then(res => res.json())
+                        .then(data => {
+                            this.status = data.status || 'disconnected';
+                            this.reachable = data.reachable !== false;
+                            this.errorMessage = data.message || '';
+                            this.qr = data.qr;
+                            this.number = data.number;
+                            this.lastUpdate = new Date().toLocaleTimeString();
+                        })
+                        .catch(err => {
+                            this.status = 'disconnected';
+                            this.reachable = false;
+                            this.errorMessage = 'Network Error: Gagal terhubung ke Laravel API.';
+                            this.qr = null;
+                            this.number = null;
+                            this.lastUpdate = new Date().toLocaleTimeString();
+                        });
+                },
+
+                fetchLogs() {
+                    fetch('{{ route('whatsapp.gateway.logs') }}')
+                        .then(res => res.json())
+                        .then(data => {
+                            if (data.logs && Array.isArray(data.logs)) {
+                                this.logs = data.logs;
+                                this.$nextTick(() => {
+                                    const container = this.$refs.logsContainer;
+                                    if (container) {
+                                        container.scrollTop = container.scrollHeight;
+                                    }
                                 });
-                        },
+                            }
+                        })
+                        .catch(err => {
+                            // Silently fail log fetching
+                        });
+                },
 
-                        logout() {
-                            if (!confirm('Apakah Anda yakin ingin memutuskan koneksi WhatsApp?')) return;
+                logout() {
+                    if (!confirm('Apakah Anda yakin ingin memutuskan koneksi WhatsApp?')) return;
 
-                            fetch('{{ route('whatsapp.gateway.logout') }}', {
-                                method: 'POST',
-                                headers: {
-                                    'X-CSRF-TOKEN': '{{ csrf_token() }}',
-                                    'Content-Type': 'application/json'
-                                }
-                            })
-                            .then(res => res.json())
-                            .then(data => {
-                                if (data.status) {
-                                    this.fetchStatus();
-                                    Swal.fire('Berhasil', 'WhatsApp telah diputus.', 'success');
-                                }
-                            });
-                        },
+                    // Immediately reset local state for instant visual feedback
+                    this.status = 'disconnected';
+                    this.qr = null;
+                    this.number = null;
 
-                        destroy() {
-                            if (this.polling) clearInterval(this.polling);
+                    fetch('{{ route('whatsapp.gateway.logout') }}', {
+                        method: 'POST',
+                        headers: {
+                            'X-CSRF-TOKEN': '{{ csrf_token() }}',
+                            'Content-Type': 'application/json'
                         }
-                    }
+                    })
+                        .then(res => res.json())
+                        .then(data => {
+                            if (data.status) {
+                                Swal.fire('Berhasil', 'WhatsApp telah diputus. QR Code baru akan muncul dalam beberapa detik...', 'success');
+                            }
+                        })
+                        .catch(err => {
+                            Swal.fire('Error', 'Gagal memutuskan koneksi: ' + err.message, 'error');
+                        });
+                },
+
+                destroy() {
+                    if (this.polling) clearInterval(this.polling);
+                    if (this.logPolling) clearInterval(this.logPolling);
                 }
-            </script>
-            <style>
-                @keyframes fadeIn {
-                    from { opacity: 0; transform: translateY(10px); }
-                    to { opacity: 1; transform: translateY(0); }
-                }
-                .animate-fade-in {
-                    animation: fadeIn 0.5s ease-out forwards;
-                }
-            </style>
+            }
+        }
+    </script>
+    <style>
+        @keyframes fadeIn {
+            from {
+                opacity: 0;
+                transform: translateY(10px);
+            }
+
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        .animate-fade-in {
+            animation: fadeIn 0.5s ease-out forwards;
+        }
+    </style>
 @endpush
 
 @push('scripts')
     <script src="https://code.jquery.com/jquery-3.7.0.min.js"></script>
+    <script src="https://cdn.datatables.net/2.1.8/js/dataTables.js"></script>
+    <script src="https://cdn.datatables.net/2.1.8/js/dataTables.tailwindcss.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/select2@4.1.0-rc.0/dist/js/select2.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
 
@@ -929,6 +1207,29 @@
         var scheduledMessageId = null;
 
         $(document).ready(function () {
+            // Initialize DataTable for Queue
+            $('#queueTable').DataTable({
+                responsive: true,
+                order: [[0, 'desc']], // Sort by Schedule Time descending by default
+                language: {
+                    emptyTable: "Tidak ada antrean jadwal pesan.",
+                    info: "Menampilkan _START_ sampai _END_ dari _TOTAL_ entri",
+                    infoEmpty: "Menampilkan 0 sampai 0 dari 0 entri",
+                    infoFiltered: "(disaring dari _MAX_ total entri)",
+                    lengthMenu: "Tampilkan _MENU_ entri",
+                    loadingRecords: "Memuat...",
+                    processing: "Memproses...",
+                    search: "Cari:",
+                    zeroRecords: "Tidak ditemukan data yang sesuai",
+                    paginate: {
+                        first: "Pertama",
+                        last: "Terakhir",
+                        next: "Lanjut",
+                        previous: "Kembali"
+                    }
+                }
+            });
+
             // Initialize Select2 for Multi-Send tab
             $('#multiUserSelect').select2({
                 placeholder: "Cari pelanggan...",
@@ -979,24 +1280,26 @@
             const minDateTime = now.toISOString().slice(0, 16);
             $('#scheduledAtInput').attr('min', minDateTime);
 
+            $('#unpaidScheduledAtInput').attr('min', minDateTime);
+
             // Update Multi-Send targets when Admin filter changes
-            $('#multiAdminFilter').on('change', function() {
+            $('#multiAdminFilter').on('change', function () {
                 const adminId = $(this).val();
                 const userSelect = $('#multiUserSelect');
 
                 userSelect.prop('disabled', true);
 
-                $.get("{{ route('whatsapp.broadcast.targets') }}", { type: 'all', admin_id: adminId }, function(response) {
+                $.get("{{ route('whatsapp.broadcast.targets') }}", { type: 'all', admin_id: adminId }, function (response) {
                     userSelect.empty();
                     // Extract targets if nested
                     const targets = response.targets || response;
-                    targets.forEach(function(target) {
+                    targets.forEach(function (target) {
                         const option = new Option(target.name + ' (' + target.phone + ')', target.id, false, false);
                         userSelect.append(option);
                     });
                     userSelect.trigger('change');
                     userSelect.prop('disabled', false);
-                }).fail(function() {
+                }).fail(function () {
                     alert('Gagal mengambil data pelanggan.');
                     userSelect.prop('disabled', false);
                 });
@@ -1007,7 +1310,7 @@
                 placeholder: '-- Pilih Template --',
                 allowClear: true,
                 width: '100%'
-            }).on('change', function() {
+            }).on('change', function () {
                 const val = $(this).val();
                 // Sync with Alpine.js
                 const tab = document.querySelector('[x-show="activeTab === \'unpaid\'"]');
@@ -1017,6 +1320,52 @@
                 }
             });
         });
+
+        // Copy Gateway API Key to Clipboard
+        function copyGatewayKey() {
+            const input = document.getElementById('gatewayApiKey');
+            const icon = document.getElementById('copyKeyIcon');
+            if (!input || !input.value) {
+                Swal.fire({ icon: 'warning', title: 'Kosong', text: 'Belum ada API Key untuk disalin.', toast: true, position: 'top-end', showConfirmButton: false, timer: 2000 });
+                return;
+            }
+            navigator.clipboard.writeText(input.value).then(function () {
+                // Visual feedback: change icon temporarily
+                icon.className = 'fas fa-check';
+                setTimeout(function () { icon.className = 'fas fa-copy'; }, 1500);
+                Swal.fire({ icon: 'success', title: 'Disalin!', text: 'API Key berhasil disalin ke clipboard.', toast: true, position: 'top-end', showConfirmButton: false, timer: 2000 });
+            }).catch(function () {
+                // Fallback for older browsers
+                input.select();
+                document.execCommand('copy');
+                Swal.fire({ icon: 'success', title: 'Disalin!', toast: true, position: 'top-end', showConfirmButton: false, timer: 2000 });
+            });
+        }
+
+        // Regenerate Gateway API Key
+        function regenerateGatewayKey() {
+            Swal.fire({
+                title: 'Ganti API Key?',
+                text: 'API Key lama tidak akan berlaku lagi.',
+                icon: 'warning',
+                showCancelButton: true,
+                confirmButtonColor: '#10b981',
+                cancelButtonColor: '#64748b',
+                confirmButtonText: 'Ya, Ganti',
+                cancelButtonText: 'Batal'
+            }).then((result) => {
+                if (result.isConfirmed) {
+                    $.post("{{ route('whatsapp.gateway.apikey') }}", {
+                        _token: $('meta[name="csrf-token"]').attr('content')
+                    }).done(function () {
+                        location.reload();
+                    }).fail(function () {
+                        Swal.fire('Error', 'Gagal mengganti API Key.', 'error');
+                    });
+                }
+            });
+        }
+
         // Save bill template via AJAX
         function saveTemplate() {
             const tab = document.querySelector('[x-show="activeTab === \'unpaid\'"]');
@@ -1038,7 +1387,7 @@
                 _token: $('meta[name="csrf-token"]').attr('content'),
                 name: name.trim(),
                 content: content.trim()
-            }).done(function(response) {
+            }).done(function (response) {
                 if (response.status) {
                     const tpl = response.template;
                     const adminName = tpl.admin ? tpl.admin.name : 'Unknown';
@@ -1065,7 +1414,7 @@
                         timer: 2000
                     });
                 }
-            }).fail(function(xhr) {
+            }).fail(function (xhr) {
                 let msg = 'Gagal menyimpan template.';
                 if (xhr.responseJSON && xhr.responseJSON.message) msg = xhr.responseJSON.message;
                 Swal.fire({ icon: 'error', title: 'Error', text: msg });
@@ -1096,7 +1445,7 @@
                         url: "{{ url('/whatsapp/bill-template') }}/" + id,
                         type: 'DELETE',
                         data: { _token: $('meta[name="csrf-token"]').attr('content') },
-                        success: function(response) {
+                        success: function (response) {
                             if (response.status) {
                                 // Remove from Select2
                                 $('#billTemplateSelect option[value="' + id + '"]').remove();
@@ -1119,7 +1468,7 @@
                                 Swal.fire('Gagal', response.message, 'error');
                             }
                         },
-                        error: function() {
+                        error: function () {
                             Swal.fire('Error', 'Gagal menghapus template.', 'error');
                         }
                     });
@@ -1246,10 +1595,10 @@
                                 icon: 'success',
                                 title: 'Broadcast Dijadwalkan!',
                                 html: `
-                                                                <p>Pesan akan dikirim pada:</p>
-                                                                <p class="text-lg font-bold text-indigo-600">${response.scheduled_at}</p>
-                                                                <p class="text-sm text-gray-500 mt-2">Total: ${response.total} penerima</p>
-                                                            `,
+                                                                                                                <p>Pesan akan dikirim pada:</p>
+                                                                                                                <p class="text-lg font-bold text-indigo-600">${response.scheduled_at}</p>
+                                                                                                                <p class="text-sm text-gray-500 mt-2">Total: ${response.total} penerima</p>
+                                                                                                            `,
                                 confirmButtonColor: '#4f46e5'
                             }).then(() => {
                                 location.reload();
@@ -1277,7 +1626,146 @@
                 });
         }
 
-        // Original Broadcast Logic for Unpaid tab
+        // Enhanced Unpaid Broadcast Function (with scheduling)
+        function startUnpaidBroadcast() {
+            const unpaidTab = document.getElementById('unpaidTab');
+            if (!unpaidTab) {
+                alert('Error: Component not found');
+                return;
+            }
+
+            const data = Alpine.$data(unpaidTab);
+            const message = $('#msgUnpaid').val().trim();
+
+            // Validations
+            if (!message) {
+                Swal.fire({
+                    icon: 'error',
+                    title: 'Pesan Kosong',
+                    text: 'Silakan masukkan isi pesan terlebih dahulu.'
+                });
+                return;
+            }
+
+            if (data.scheduleMode === 'scheduled' && !data.scheduledAt) {
+                Swal.fire({
+                    icon: 'error',
+                    title: 'Waktu Belum Dipilih',
+                    text: 'Silakan pilih waktu penjadwalan.'
+                });
+                return;
+            }
+
+            // Confirm action
+            const confirmTitle = data.scheduleMode === 'now' ? 'Kirim Broadcast Tagihan Sekarang?' : 'Jadwalkan Broadcast Tagihan?';
+            const confirmText = `Ke semua pelanggan unpaid (max ${data.maxRecipients === 9999 ? 'unlimited' : data.maxRecipients})`;
+
+            Swal.fire({
+                title: confirmTitle,
+                text: confirmText,
+                icon: 'question',
+                showCancelButton: true,
+                confirmButtonColor: '#f59e0b',
+                cancelButtonColor: '#64748b',
+                confirmButtonText: data.scheduleMode === 'now' ? 'Ya, Kirim Sekarang' : 'Ya, Jadwalkan',
+                cancelButtonText: 'Batal'
+            }).then((result) => {
+                if (result.isConfirmed) {
+                    processUnpaidBroadcastRequest(data, message);
+                }
+            });
+        }
+
+        function processUnpaidBroadcastRequest(data, message) {
+            // Show loading
+            Swal.fire({
+                title: 'Memproses...',
+                text: 'Menyiapkan broadcast tagihan',
+                allowOutsideClick: false,
+                didOpen: () => Swal.showLoading()
+            });
+
+            // Prepare request data
+            const requestData = {
+                _token: $('meta[name="csrf-token"]').attr('content'),
+                message: message,
+                whatsapp_age: data.whatsappAge,
+                schedule_mode: data.scheduleMode,
+                scheduled_at: data.scheduleMode === 'scheduled' ? data.scheduledAt : null,
+                admin_id: $('#unpaidAdminFilter').val() || null
+            };
+
+            $.post("{{ route('whatsapp.unpaid.schedule') }}", requestData)
+                .done(function (response) {
+                    Swal.close();
+
+                    if (response.status) {
+                        if (response.mode === 'immediate') {
+                            // Start immediate broadcast
+                            scheduledMessageId = response.scheduled_message_id;
+                            queue = response.targets;
+                            total = queue.length;
+                            messageToSend = message;
+
+                            if (total === 0) {
+                                Swal.fire({
+                                    icon: 'warning',
+                                    title: 'Tidak Ada Target',
+                                    text: 'Tidak ada pelanggan unpaid yang ditemukan.'
+                                });
+                                return;
+                            }
+
+                            // Show monitor area and start processing
+                            $('#monitorArea').slideDown();
+                            $('#logList').html('');
+                            $('#progressBar').css('width', '0%');
+                            $('#statSuccess').text('0');
+                            $('#statFail').text('0');
+                            current = 0;
+                            successCount = 0;
+                            failCount = 0;
+                            $('button').prop('disabled', true);
+                            processQueue();
+                        } else {
+                            // Scheduled for later
+                            Swal.fire({
+                                icon: 'success',
+                                title: 'Broadcast Tagihan Dijadwalkan!',
+                                html: `
+                                                                                    <p>Pesan akan dikirim pada:</p>
+                                                                                    <p class="text-lg font-bold text-amber-600">${response.scheduled_at}</p>
+                                                                                    <p class="text-sm text-gray-500 mt-2">Total: ${response.total} penerima (unpaid saat ini)</p>
+                                                                                    <p class="text-xs text-gray-400 mt-1">Catatan: Daftar penerima akan diperbarui saat waktu pengiriman tiba.</p>
+                                                                                `,
+                                confirmButtonColor: '#f59e0b'
+                            }).then(() => {
+                                location.reload();
+                            });
+                        }
+                    } else {
+                        Swal.fire({
+                            icon: 'error',
+                            title: 'Gagal',
+                            text: response.message || 'Terjadi kesalahan.'
+                        });
+                    }
+                })
+                .fail(function (xhr) {
+                    Swal.close();
+                    let errorMsg = 'Terjadi kesalahan server.';
+                    if (xhr.responseJSON && xhr.responseJSON.message) {
+                        errorMsg = xhr.responseJSON.message;
+                    }
+                    Swal.fire({
+                        icon: 'error',
+                        title: 'Error',
+                        text: errorMsg
+                    });
+                });
+        }
+
+        // Original Broadcast Logic for Unpaid tab (legacy - kept for backward compat)
         function prepareBroadcast(type) {
             messageToSend = type === 'unpaid' ? $('#msgUnpaid').val() : $('#msgAll').val();
             if (!messageToSend.trim()) {
@@ -1351,7 +1839,7 @@
                     icon: 'success',
                     title: 'Broadcast Selesai!',
                     html: `<p>Sukses: <span class="text-green-600 font-bold">${successCount}</span></p>
-                                                       <p>Gagal: <span class="text-red-600 font-bold">${failCount}</span></p>`,
+                                                                                                       <p>Gagal: <span class="text-red-600 font-bold">${failCount}</span></p>`,
                     confirmButtonColor: '#4f46e5'
                 });
 
@@ -1430,6 +1918,38 @@
                         error: function () {
                             Swal.fire('Error', 'Gagal menghapus jadwal pesan.', 'error');
                         }
+                    });
+                }
+            });
+        }
+        // Regenerate Gateway API Key via POST
+        function regenerateGatewayKey() {
+            Swal.fire({
+                title: 'Regenerasi API Key?',
+                text: 'API Key lama tidak akan berlaku lagi. Anda harus memperbarui konfigurasi pada gateway Anda.',
+                icon: 'warning',
+                showCancelButton: true,
+                confirmButtonColor: '#10b981',
+                cancelButtonColor: '#64748b',
+                confirmButtonText: 'Ya, Regenerasi',
+                cancelButtonText: 'Batal'
+            }).then((result) => {
+                if (result.isConfirmed) {
+                    $.post("{{ route('whatsapp.gateway.apikey') }}", {
+                        _token: $('meta[name="csrf-token"]').attr('content')
+                    }).done(function (response) {
+                        if (response.status !== false) {
+                            Swal.fire({
+                                icon: 'success',
+                                title: 'Berhasil!',
+                                text: 'API Key baru telah dibuat. Silakan simpan konfigurasi.',
+                                confirmButtonColor: '#10b981'
+                            }).then(() => {
+                                location.reload();
+                            });
+                        }
+                    }).fail(function () {
+                        Swal.fire('Error', 'Gagal regenerasi API Key.', 'error');
                     });
                 }
             });

@@ -23,6 +23,7 @@ use App\Http\Controllers\SubscriptionController;
 use App\Http\Controllers\SiteSettingController;
 use App\Http\Controllers\ControlController;
 use App\Http\Controllers\DashboardController;
+use App\Http\Controllers\CustomerBalanceController;
 
 
 
@@ -90,12 +91,14 @@ Route::middleware(['auth'])->group(function () {
     Route::get('/admin/pppoe', [PppoeController::class, 'index'])->name('pppoe.dashboard');
     //Route Maps Pelanggan
     Route::get('/maps', [App\Http\Controllers\MapController::class, 'index'])->name('maps.index');
+    Route::get('/maps/data', [App\Http\Controllers\MapController::class, 'data'])->name('maps.data');
 
     // ... (SISA SEMUA ROUTE LAMA ANDA : BILLING, ADMIN, OPERATOR TETAP DISINI) ...
 
     // Billing
     Route::get('/billing', [BillingController::class, 'index'])->name('billing.index');
     Route::post('/billing/{id}/pay', [BillingController::class, 'processPayment'])->name('billing.pay');
+    Route::post('/billing/{id}/pay-manual', [BillingController::class, 'payManual'])->name('billing.payManual');
     Route::post('/billing/{id}/pay-ajax', [BillingController::class, 'processPaymentAjax'])->name('billing.payAjax');
 
     Route::post('/billing/{id}/cancel', [BillingController::class, 'cancelPayment'])->name('billing.cancel');
@@ -103,6 +106,8 @@ Route::middleware(['auth'])->group(function () {
     Route::post('/billing/generate', [BillingController::class, 'generate'])->name('billing.generate');
     // AJAX Bulk Billing
     Route::get('/billing/generate-list', [BillingController::class, 'getList'])->name('billing.list');
+    Route::get('/billing/customer/{id}/history', [BillingController::class, 'customerHistory'])->name('billing.history');
+    Route::get('/billing/{id}/unpaid-months', [BillingController::class, 'getUnpaidMonths'])->name('billing.unpaidMonths');
     Route::post('/billing/generate-process', [BillingController::class, 'processItem'])->name('billing.process');
     Route::get('/billing/{id}/print', [BillingController::class, 'print'])->name('billing.print');
     Route::delete('/billing/bulk-destroy', [BillingController::class, 'bulkDestroy'])->name('billing.bulkDestroy');
@@ -142,16 +147,25 @@ Route::middleware(['auth'])->group(function () {
         Route::delete('/whatsapp/broadcast/schedule/{id}', [WhatsappController::class, 'destroyScheduled'])->name('whatsapp.broadcast.schedule.destroy');
         // Route Helper Gateway (Essential only)
         Route::post('/whatsapp/api-key', [WhatsappController::class, 'regenerateApiKey'])->name('whatsapp.apikey');
+        Route::post('/whatsapp/gateway-api-key', [WhatsappController::class, 'regenerateGatewayApiKey'])->name('whatsapp.gateway.apikey');
         Route::get('/whatsapp/gateway-status', [WhatsappController::class, 'getGatewayStatus'])->name('whatsapp.gateway.status');
         Route::post('/whatsapp/gateway-logout', [WhatsappController::class, 'logoutGateway'])->name('whatsapp.gateway.logout');
+        Route::get('/whatsapp/gateway-logs', [WhatsappController::class, 'getGatewayLogs'])->name('whatsapp.gateway.logs');
 
         // Bill Template CRUD (AJAX)
         Route::post('/whatsapp/bill-template', [WhatsappController::class, 'storeBillTemplate'])->name('whatsapp.billTemplate.store');
         Route::delete('/whatsapp/bill-template/{id}', [WhatsappController::class, 'destroyBillTemplate'])->name('whatsapp.billTemplate.destroy');
+        Route::post('/whatsapp/unpaid/schedule', [WhatsappController::class, 'scheduleUnpaidBroadcast'])->name('whatsapp.unpaid.schedule');
 
         // Route Proses Kirim (yang sudah dibuat sebelumnya)
         Route::post('/whatsapp/broadcast/process', [WhatsappController::class, 'broadcastProcess'])->name('whatsapp.broadcast.process');
         Route::delete('/customers/{id}', [CustomerController::class, 'destroy'])->name('customers.destroy');
+
+        // CUSTOMER BALANCE (Saldo)
+        Route::post('/customers/{customer}/balance', [CustomerBalanceController::class, 'store'])->name('customer.balance.store');
+        Route::get('/customers/{customer}/balance', [CustomerBalanceController::class, 'history'])->name('customer.balance.history');
+        Route::put('/customer-balance/{id}', [CustomerBalanceController::class, 'update'])->name('customer.balance.update');
+        Route::delete('/customer-balance/{id}', [CustomerBalanceController::class, 'destroy'])->name('customer.balance.destroy');
 
         // AKUNTANSI & KEUANGAN
         Route::get('/accounting', [AccountingController::class, 'index'])->name('accounting.index');
@@ -168,7 +182,6 @@ Route::middleware(['auth'])->group(function () {
         Route::post('/router-setting', [RouterSettingController::class, 'store'])->name('router.store'); // Create & Update
         Route::post('/router-setting/activate/{id}', [RouterSettingController::class, 'activate'])->name('router.activate');
         Route::delete('/router-setting/{id}', [RouterSettingController::class, 'destroy'])->name('router.destroy');
-        Route::get('/router-setting/check-connection/{id}', [RouterSettingController::class, 'checkConnection'])->name('router.checkConnection');
 
         Route::get('/paket-plan', [PlanController::class, 'publicIndex'])->name('plans.public');
         Route::post('/paket-plan/checkout', [SubscriptionController::class, 'checkout'])->name('plans.checkout');
@@ -182,6 +195,7 @@ Route::middleware(['auth'])->group(function () {
             Route::post('/system/update', [SystemController::class, 'update'])->name('system.update');
             Route::post('/system/update-token', [SystemController::class, 'saveToken'])->name('system.saveToken');
             Route::post('/system/clear-cache', [SystemController::class, 'clearCache'])->name('system.clear-cache');
+            Route::post('/system/symlink', [SystemController::class, 'createSymlink'])->name('system.symlink');
 
             Route::post('/system/migrate', [SystemController::class, 'migrate'])->name('system.migrate');
             Route::get('/system/backup', [SystemController::class, 'backup'])->name('system.backup');

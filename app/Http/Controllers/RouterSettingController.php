@@ -3,90 +3,52 @@
 namespace App\Http\Controllers;
 
 use App\Models\RouterSetting;
-use App\Services\MikrotikService;
 use Illuminate\Http\Request;
+
 use App\Models\Plan;
 
 class RouterSettingController extends Controller
 {
-    /**
-     * Check if the authenticated user owns the given router.
-     * Superadmin also owns routers with null admin_id (legacy data).
-     */
-    private function isRouterOwner($router)
-    {
-        $user = auth()->user();
-        return $router->admin_id == $user->id || ($user->isSuperAdmin() && $router->admin_id === null);
-    }
     public function index(Request $request)
     {
         $ownership = $request->input('ownership', 'semua');
-        $query = RouterSetting::orderBy('is_active', 'desc');
-
-        // Jika superadmin, beri opsi filter kepemilikan
+        // Jika superadmin, bypass SEMUA global scope agar bisa melihat semua router
         if (auth()->user()->isSuperAdmin()) {
+            $query = RouterSetting::withoutGlobalScopes()->orderBy('is_active', 'desc');
+
             if ($ownership === 'superadmin') {
                 $query->whereHas('admin', function ($q) {
                     $q->where('role', 'superadmin');
                 });
             } elseif ($ownership === 'admin') {
                 $query->whereHas('admin', function ($q) {
-                    $q->where('role', 'admin')->orWhere('role', 'operator');
+                    $q->where('role', 'admin');
                 });
             }
+        } else {
+            $query = RouterSetting::orderBy('is_active', 'desc');
         }
-        // Admin/tenant: TenantScope already filters by admin_id
 
-        $routers = $query->with('admin')->get();
-
+        $routers = $query->with('admin')->get(); // Eager load admin info
         $plans = Plan::all();
         return view('router.index', compact('routers', 'plans', 'ownership'));
-    }
-
-    /**
-     * AJAX endpoint: check MikroTik connection status for a single router.
-     * Returns JSON: { connected: bool, identity: string|null }
-     */
-    public function checkConnection($id)
-    {
-        $router = RouterSetting::withoutGlobalScopes()->find($id);
-
-        if (!$router) {
-            return response()->json(['connected' => false, 'identity' => null]);
-        }
-
-        $status = MikrotikService::checkRouterConnection(
-            $router->host,
-            $router->username,
-            $router->password,
-            $router->port
-        );
-
-        return response()->json($status);
     }
 
     // SIMPAN BARU / UPDATE
     public function store(Request $request)
     {
         $user = auth()->user();
-
-        // Ownership guard: if editing, verify ownership
-        if ($request->id) {
-            $existing = RouterSetting::withoutGlobalScopes()->find($request->id);
-            if (!$existing || !$this->isRouterOwner($existing)) {
-                return back()->with('error', 'Anda tidak memiliki izin untuk mengedit router ini.');
-            }
-        }
-
         // Superadmin bypasses plan and activation checks
         if (!$user->isSuperAdmin()) {
             $plan = $user->plan;
+            // Jika tidak punya paket (null), kita beri default limit atau paksa punya?
+            // Untuk amannya, jika null asumsikan starter (tapi lebih baik dibuat via seeder/default)
             if (!$plan) {
                 return back()->with('error', 'Silakan hubungi Superadmin untuk aktivasi paket layanan Anda.');
             }
 
             if (!$request->id) { // Jika INSERT baru
-                $currentCount = RouterSetting::where('admin_id', $user->id)->count();
+                $currentCount = RouterSetting::count();
                 if ($currentCount >= $plan->max_routers) {
                     return back()->with('error', "Limit Router Tercapai! Paket Anda (" . $plan->name . ") hanya mendukung maksimal " . $plan->max_routers . " router.");
                 }
@@ -112,12 +74,15 @@ class RouterSettingController extends Controller
 
         // Cek ID (jika ada ID berarti Edit, jika tidak berarti Baru)
         if ($request->id) {
-            $router = RouterSetting::withoutGlobalScopes()->find($request->id);
+            $router = $user->isSuperAdmin()
+                ? RouterSetting::withoutGlobalScopes()->find($request->id)
+                : RouterSetting::find($request->id);
+
             $router->update($data);
             $msg = 'Konfigurasi berhasil diperbarui.';
         } else {
-            // Jika ini router pertama milik user, langsung set aktif
-            if (RouterSetting::where('admin_id', $user->id)->count() == 0) {
+            // Jika ini router pertama untuk user ini, langsung set aktif
+            if (RouterSetting::count() == 0) {
                 $data['is_active'] = true;
             }
             $data['password'] = $request->password; // Password wajib buat baru
@@ -132,18 +97,22 @@ class RouterSettingController extends Controller
     public function activate($id)
     {
         $user = auth()->user();
-        $router = RouterSetting::withoutGlobalScopes()->find($id);
 
-        if (!$router || !$this->isRouterOwner($router)) {
-            return back()->with('error', 'Anda tidak memiliki izin untuk mengaktifkan router ini.');
+        $router = $user->isSuperAdmin()
+            ? RouterSetting::withoutGlobalScope(\App\Scopes\TenantScope::class)->find($id)
+            : RouterSetting::find($id);
+
+        if (!$router) {
+            return back()->with('error', 'Router tidak ditemukan.');
         }
 
-        // Matikan semua router milik user ini saja
+        // 1. Matikan semua router milik admin_id yang sama dengan router yang akan diaktifkan
+        // Ini memastikan aktivasi router superadmin tidak mematikan router admin, dan sebaliknya.
         RouterSetting::withoutGlobalScopes()
-            ->where('admin_id', $user->id)
+            ->where('admin_id', $router->admin_id)
             ->update(['is_active' => false]);
 
-        // Aktifkan yang dipilih
+        // 2. Aktifkan yang dipilih
         $router->update(['is_active' => true]);
 
         return back()->with('success', "Berhasil beralih ke router: {$router->label} ({$router->host})");
@@ -153,11 +122,9 @@ class RouterSettingController extends Controller
     public function destroy($id)
     {
         $user = auth()->user();
-        $router = RouterSetting::withoutGlobalScopes()->find($id);
-
-        if (!$router || !$this->isRouterOwner($router)) {
-            return back()->with('error', 'Anda tidak memiliki izin untuk menghapus router ini.');
-        }
+        $router = $user->isSuperAdmin()
+            ? RouterSetting::withoutGlobalScopes()->find($id)
+            : RouterSetting::find($id);
 
         if ($router->is_active) {
             return back()->with('error', 'Tidak bisa menghapus router yang sedang digunakan (Aktif). Pindahkan koneksi dulu.');

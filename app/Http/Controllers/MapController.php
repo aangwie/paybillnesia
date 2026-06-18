@@ -17,28 +17,45 @@ class MapController extends Controller
 
     public function index()
     {
-        // 1. Ambil Pelanggan yang punya Koordinat saja
-        $customers = Customer::whereNotNull('latitude')
-            ->whereNotNull('longitude')
-            ->get();
+        $mapData = $this->getMapData();
+        return view('maps.index', compact('mapData'));
+    }
 
-        // 2. Ambil Data User Online dari Mikrotik
-        $onlineUsers = collect([]);
-        try {
-            if ($this->mikrotik->isConnected()) {
-                $actives = $this->mikrotik->getActiveUsers();
-                // Buat collection key-by username agar mudah dicek
-                $onlineUsers = collect($actives)->pluck('name')->flip();
-            }
-        } catch (\Exception $e) {
-            // Ignore error jika mikrotik mati, anggap semua offline
+    public function data()
+    {
+        return response()->json($this->getMapData());
+    }
+
+    private function getMapData()
+    {
+        $user = auth()->user();
+
+        // 1. Ambil Pelanggan yang punya Koordinat saja, filtered by user role
+        $query = Customer::whereNotNull('latitude')
+            ->whereNotNull('longitude');
+
+        if ($user->role === 'operator') {
+            $query->where('operator_id', $user->id);
+        } elseif ($user->role === 'admin' || $user->role === 'superadmin') {
+            $query->where('admin_id', $user->id);
         }
 
-        // 3. Format Data untuk Map (GeoJSON like)
-        $mapData = $customers->map(function($c) use ($onlineUsers) {
-            // Cek apakah user ini ada di daftar online mikrotik?
+        $customers = $query->get();
+
+        // 2. Ambil Data User Online dari SEMUA Mikrotik yang aktif
+        $onlineUsers = collect([]);
+        try {
+            $actives = $this->mikrotik->getAllActiveUsers();
+            // Buat collection key-by username agar mudah dicek
+            $onlineUsers = collect($actives)->pluck('name')->flip();
+        } catch (\Exception $e) {
+            // Ignore error jika mikrotik mati
+        }
+
+        // 3. Format Data untuk Map
+        return $customers->map(function ($c) use ($onlineUsers) {
             $isOnline = $onlineUsers->has($c->pppoe_username);
-            
+
             return [
                 'name' => $c->name,
                 'username' => $c->pppoe_username,
@@ -49,7 +66,5 @@ class MapController extends Controller
                 'phone' => $c->phone,
             ];
         });
-
-        return view('maps.index', compact('mapData'));
     }
 }

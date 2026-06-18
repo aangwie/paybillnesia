@@ -7,10 +7,19 @@ use Illuminate\Support\Facades\Log;
 
 class WhatsappService
 {
-    public static function send($targetNumber, $message)
+    public static function send($targetNumber, $message, $adminId = null)
     {
         // 1. Ambil Pengaturan dari Database
-        $setting = WhatsappSetting::first();
+        if ($adminId) {
+            // Jika adminId diberikan (misal dari cron), ambil secara eksplisit
+            $setting = WhatsappSetting::withoutGlobalScopes()
+                ->where('admin_id', $adminId)
+                ->first();
+        } else {
+            // Jika tidak ada adminId, gunakan scope default (yg login)
+            $setting = WhatsappSetting::first();
+        }
+
         if (!$setting) {
             return ['status' => false, 'message' => 'Pengaturan WhatsApp belum dikonfigurasi.'];
         }
@@ -26,17 +35,32 @@ class WhatsappService
         // 3. Cek Provider: API atau Gateway
         if ($setting->wa_provider === 'gateway') {
             // KIRIM VIA SELF-HOSTED GATEWAY (BAILEYS)
-            $url = ($setting->wa_gateway_url ?? 'http://localhost:3000') . '/send';
+            $gatewayUrl = $setting->wa_gateway_url;
+            if (empty($gatewayUrl)) {
+                $saSetting = WhatsappSetting::withoutGlobalScopes()
+                    ->whereHas('admin', function ($q) {
+                        $q->where('role', 'superadmin'); })
+                    ->first();
+                $gatewayUrl = $saSetting->wa_gateway_url ?? 'http://localhost:3000';
+            }
+            $gatewayUrl = $gatewayUrl ?? 'http://localhost:3000';
+
+            $url = rtrim($gatewayUrl, '/') . '/send';
             $data = [
                 'number' => $targetNumber,
                 'message' => $message,
+                'session' => $setting->gateway_session,
             ];
 
             try {
                 $client = new \GuzzleHttp\Client();
                 $response = $client->post($url, [
                     'json' => $data,
+                    'headers' => [
+                        'x-api-key' => $setting->api_key_gateway,
+                    ],
                     'timeout' => 15,
+                    'verify' => false,
                     'http_errors' => false
                 ]);
 
@@ -56,7 +80,7 @@ class WhatsappService
 
         // --- KIRIM VIA API EXTERNAL (Provider Lama) ---
         $url = $setting->target_url;
-        $apiKey = $setting->api_key;
+        $apiKey = $setting->api_key_external;
         $sender = $setting->sender_number;
 
         $data = [

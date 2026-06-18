@@ -5,6 +5,7 @@ namespace App\Console\Commands;
 use App\Models\ScheduledMessage;
 use App\Models\Customer;
 use App\Services\WhatsappService;
+use App\Models\Invoice;
 use Illuminate\Console\Command;
 use Carbon\Carbon;
 
@@ -38,6 +39,7 @@ class ProcessScheduledMessages extends Command
         $this->info("📬 Found {$pendingMessages->count()} scheduled message(s) to process.");
 
         foreach ($pendingMessages as $scheduledMessage) {
+            /** @var ScheduledMessage $scheduledMessage */
             $this->processMessage($scheduledMessage);
         }
 
@@ -47,22 +49,35 @@ class ProcessScheduledMessages extends Command
 
     protected function processMessage(ScheduledMessage $scheduledMessage)
     {
-        $this->info("📤 Processing message ID: {$scheduledMessage->id}");
+        $this->info("📤 Processing message ID: {$scheduledMessage->id} (type: {$scheduledMessage->broadcast_type})");
 
         // Mark as processing
         $scheduledMessage->update(['status' => 'processing']);
 
-        $customerIds = $scheduledMessage->customer_ids;
         $message = $scheduledMessage->message;
         $successCount = 0;
         $failCount = 0;
         $errors = [];
 
-        // Get customers
-        $customers = Customer::whereIn('id', $customerIds)
-            ->whereNotNull('phone')
-            ->where('phone', '!=', '')
-            ->get();
+        // For unpaid type, re-resolve customer IDs at execution time
+        if ($scheduledMessage->broadcast_type === 'unpaid') {
+            $maxRecipients = ScheduledMessage::getMaxRecipients($scheduledMessage->whatsapp_age);
+            $customers = Customer::whereNotNull('phone')
+                ->where('phone', '!=', '')
+                ->whereHas('invoices', function ($q) {
+                    $q->where('status', '!=', 'paid');
+                })
+                ->limit($maxRecipients)
+                ->get();
+
+            $scheduledMessage->update(['total_count' => $customers->count()]);
+        } else {
+            $customerIds = $scheduledMessage->customer_ids;
+            $customers = Customer::whereIn('id', $customerIds)
+                ->whereNotNull('phone')
+                ->where('phone', '!=', '')
+                ->get();
+        }
 
         $total = $customers->count();
         $this->output->progressStart($total);
@@ -74,7 +89,7 @@ class ProcessScheduledMessages extends Command
                 $msg = str_replace('{tagihan}', number_format($customer->monthly_price, 0, ',', '.'), $msg);
 
                 // Send message
-                $result = $this->waService->send($customer->phone, $msg);
+                $result = $this->waService->send($customer->phone, $msg, $scheduledMessage->admin_id);
 
                 if ($result['status']) {
                     $successCount++;

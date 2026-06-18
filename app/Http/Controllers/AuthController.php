@@ -7,7 +7,10 @@ use Illuminate\Support\Facades\Auth;
 use App\Traits\HandlesMailConfiguration;
 use App\Models\User;
 use App\Notifications\AdminRequestNotification;
+use App\Services\TurnstileService;
+use App\Models\SiteSetting;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Mail;
 use Illuminate\Support\Facades\Password;
 use Illuminate\Support\Str;
@@ -26,7 +29,8 @@ class AuthController extends Controller
     // 4. Tampilkan Halaman Register
     public function showRegisterForm()
     {
-        return view('auth.register');
+        $turnstileSiteKey = TurnstileService::getSiteKey();
+        return view('auth.register', compact('turnstileSiteKey'));
     }
 
     // 5. Proses Register
@@ -36,7 +40,39 @@ class AuthController extends Controller
             'name' => 'required|string|max:255',
             'email' => 'required|string|email|max:255|unique:users',
             'password' => 'required|string|min:6|confirmed',
+            'cf-turnstile-response' => 'sometimes|required|string',
+            // Honeypot: field tersembunyi yang tidak boleh diisi manusia
+            'website' => 'sometimes|string|nullable',
+            // Form timestamp: untuk deteksi kecepatan pengisian
+            'form_time' => 'sometimes|integer|nullable',
         ]);
+
+        // 1. CEK HONEYPOT: jika field "website" terisi, pasti bot
+        if (!TurnstileService::validateHoneypot($request->input('website'))) {
+            Log::warning('Register blocked by honeypot', ['email' => $request->email]);
+            return redirect()->route('login')->with('success', 'Registrasi berhasil! Silakan cek email Anda untuk verifikasi akun sebelum login.');
+        }
+
+        // 2. CEK FORM TIME: jika terlalu cepat (< 3 detik), kemungkinan bot
+        if (!TurnstileService::validateFormTime($request->integer('form_time'), 3)) {
+            Log::warning('Register blocked by form time check', [
+                'email' => $request->email,
+                'form_time' => $request->input('form_time'),
+            ]);
+            return redirect()->route('login')->with('success', 'Registrasi berhasil! Silakan cek email Anda untuk verifikasi akun sebelum login.');
+        }
+
+        // 3. VALIDASI Cloudflare Turnstile
+        if ($request->has('cf-turnstile-response') && !empty($request->input('cf-turnstile-response'))) {
+            $turnstile = TurnstileService::verify($request->input('cf-turnstile-response'));
+            if (!$turnstile['success']) {
+                Log::warning('Register blocked by Turnstile', [
+                    'email' => $request->email,
+                    'message' => $turnstile['message'],
+                ]);
+                return back()->withErrors(['cf-turnstile-response' => 'Verifikasi keamanan gagal: ' . $turnstile['message']])->withInput();
+            }
+        }
 
         $user = User::create([
             'name' => $request->name,

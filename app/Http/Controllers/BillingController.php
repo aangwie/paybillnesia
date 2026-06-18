@@ -6,8 +6,9 @@ use App\Models\Invoice;
 use App\Models\Customer;
 use App\Models\Company;
 use App\Models\User;
+use App\Models\CustomerBalance;
 use App\Services\MikrotikService;
-use App\Services\WhatsappService; // 1. Import Service WA
+use App\Services\WhatsappService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Carbon\Carbon;
@@ -78,6 +79,26 @@ class BillingController extends Controller
             }
         }
 
+        // Hitung Piutang (total outstanding dari semua invoice unpaid sebelum bulan ini)
+        $piutangQuery = Invoice::where('status', 'unpaid')
+            ->where(function($q) use ($month, $year) {
+                $q->whereYear('due_date', '<', $year)
+                  ->orWhere(function($q2) use ($month, $year) {
+                      $q2->whereYear('due_date', $year)->whereMonth('due_date', '<', $month);
+                  });
+            });
+        if ($user->role == 'operator') {
+            $piutangQuery->whereHas('customer', fn($q) => $q->where('operator_id', $user->id));
+        } elseif ($user->role == 'superadmin' && $selectedAdminId) {
+            $piutangQuery->whereHas('customer', fn($q) => $q->where('admin_id', $selectedAdminId));
+        }
+        $total_piutang = $piutangQuery->sum('outstanding');
+        // Juga tambahkan invoice yang masih unpaid sepenuhnya (outstanding = 0 tapi belum dibayar)
+        $piutangFullUnpaid = (clone $piutangQuery)->where('outstanding', 0)->get();
+        foreach ($piutangFullUnpaid as $pInv) {
+            $total_piutang += ($pInv->price > 0 ? $pInv->price : ($pInv->customer->monthly_price ?? 0));
+        }
+
         $customerQuery = Customer::orderBy('name', 'asc');
         if ($user->role == 'operator') {
             $customerQuery->where('operator_id', $user->id);
@@ -89,7 +110,7 @@ class BillingController extends Controller
             $admins = User::whereIn('role', ['admin', 'superadmin'])->get(['id', 'name', 'role']);
         }
 
-        return view('billing.index', compact('invoices', 'customers', 'month', 'year', 'total_bill', 'paid_bill', 'unpaid_bill', 'admins', 'selectedAdminId'));
+        return view('billing.index', compact('invoices', 'customers', 'month', 'year', 'total_bill', 'paid_bill', 'unpaid_bill', 'total_piutang', 'admins', 'selectedAdminId'));
     }
 
     public function generate(Request $request)
@@ -126,11 +147,24 @@ class BillingController extends Controller
                 ->exists();
 
             if (!$exists) {
+                // Hitung total outstanding dari invoice sebelumnya yang belum lunas
+                $prevOutstanding = Invoice::where('customer_id', $customer->id)
+                    ->where('status', 'unpaid')
+                    ->where(function($q) use ($request) {
+                        $q->whereYear('due_date', '<', $request->year)
+                          ->orWhere(function($q2) use ($request) {
+                              $q2->whereYear('due_date', $request->year)
+                                 ->whereMonth('due_date', '<', $request->month);
+                          });
+                    })
+                    ->sum('outstanding');
+
                 Invoice::create([
                     'customer_id' => $customer->id,
-                    'admin_id' => $customer->admin_id, // Ensure admin_id is carried over
+                    'admin_id' => $customer->admin_id,
                     'due_date' => $request->due_date,
-                    'price' => $customer->monthly_price, // Save current price
+                    'price' => $customer->monthly_price,
+                    'outstanding' => $prevOutstanding,
                     'status' => 'unpaid',
                 ]);
                 $count++;
@@ -200,11 +234,24 @@ class BillingController extends Controller
             return response()->json(['status' => 'skipped', 'name' => $customer->name]);
         }
 
+        // Hitung outstanding dari bulan sebelumnya
+        $prevOutstanding = Invoice::where('customer_id', $customer->id)
+            ->where('status', 'unpaid')
+            ->where(function($q) use ($request) {
+                $q->whereYear('due_date', '<', $request->year)
+                  ->orWhere(function($q2) use ($request) {
+                      $q2->whereYear('due_date', $request->year)
+                         ->whereMonth('due_date', '<', $request->month);
+                  });
+            })
+            ->sum('outstanding');
+
         Invoice::create([
             'customer_id' => $customer->id,
             'admin_id' => $customer->admin_id,
             'due_date' => $request->due_date,
             'price' => $customer->monthly_price,
+            'outstanding' => $prevOutstanding,
             'status' => 'unpaid',
         ]);
 
@@ -280,7 +327,7 @@ class BillingController extends Controller
             try {
                 if ($this->mikrotik->isConnected()) {
                     $this->mikrotik->setSecretStatus($userPppoe, 'enabled');
-                    $this->mikrotik->kickUser($userPppoe);
+                    // $this->mikrotik->kickUser($userPppoe); // Disable kick active connection
                     $pesanMikrotik = "Mikrotik: Enabled.";
                 } else {
                     $pesanMikrotik = "Mikrotik: Gagal Konek.";
@@ -357,7 +404,7 @@ class BillingController extends Controller
         try {
             if ($this->mikrotik->isConnected()) {
                 $this->mikrotik->setSecretStatus($userPppoe, 'enabled');
-                $this->mikrotik->kickUser($userPppoe);
+                // $this->mikrotik->kickUser($userPppoe); // Disable kick active connection
                 $pesanMikrotik = "Mikrotik: Enabled.";
             } else {
                 $pesanMikrotik = "Mikrotik: Gagal Konek.";
@@ -399,6 +446,180 @@ class BillingController extends Controller
     }
 
     /**
+     * PROSES PEMBAYARAN MANUAL VIA AJAX (SweetAlert)
+     * Supports: manual payment amount & saldo payment
+     */
+    public function payManual(Request $request, $id)
+    {
+        $request->validate([
+            'method' => 'required|in:manual,saldo',
+            'amount' => 'nullable|numeric|min:0',
+            'additional_payments' => 'nullable|array',
+            'additional_payments.*.invoice_id' => 'sometimes|integer',
+            'additional_payments.*.amount' => 'sometimes|numeric|min:0',
+        ]);
+
+        $invoice = Invoice::with('customer')->findOrFail($id);
+        $customer = $invoice->customer;
+
+        if ($invoice->status == 'paid') {
+            return response()->json(['success' => false, 'message' => 'Invoice sudah lunas.']);
+        }
+
+        $invoiceDate = \Carbon\Carbon::parse($invoice->due_date);
+        $month = $invoiceDate->month;
+        $year = $invoiceDate->year;
+
+        $previousInvoices = Invoice::where('customer_id', $invoice->customer_id)
+            ->where('status', 'unpaid')
+            ->where('id', '!=', $invoice->id)
+            ->where(function($q) use ($month, $year) {
+                $q->whereYear('due_date', '<', $year)
+                  ->orWhere(function($q2) use ($month, $year) {
+                      $q2->whereYear('due_date', $year)->whereMonth('due_date', '<', $month);
+                  });
+            })
+            ->get();
+
+        $akumulasiKurangBayar = 0;
+        foreach ($previousInvoices as $prevInv) {
+            $prevPrice = $prevInv->price > 0 ? $prevInv->price : ($prevInv->customer->monthly_price ?? 0);
+            if ($prevPrice == 0) continue; 
+            
+            $unpaid = $prevPrice - $prevInv->paid_amount;
+            $akumulasiKurangBayar += $unpaid;
+        }
+        if ($akumulasiKurangBayar < 0) $akumulasiKurangBayar = 0;
+
+        // Sinkronisasi outstanding real-time ke database
+        $invoice->outstanding = $akumulasiKurangBayar;
+        $invoice->save();
+
+        $price = $invoice->price > 0 ? $invoice->price : ($customer->monthly_price ?? 0);
+        // Total yang harus dibayar = price saja (tanpa tunggakan, karena tunggakan dibayar terpisah via additional_payments)
+        $mainDue = $price;
+
+        // Hitung total additional payments
+        $additionalPayments = $request->input('additional_payments', []);
+        $totalAdditionalAmount = 0;
+        foreach ($additionalPayments as $ap) {
+            $totalAdditionalAmount += (int) $ap['amount'];
+        }
+
+        $method = $request->method;
+        $payAmount = 0;
+
+        if ($method == 'saldo') {
+            // Bayar pakai saldo
+            $totalAll = $mainDue + $totalAdditionalAmount;
+            $saldo = CustomerBalance::where('customer_id', $customer->id)->sum('amount');
+            if ($saldo <= 0) {
+                return response()->json(['success' => false, 'message' => 'Saldo pelanggan kosong.']);
+            }
+            $payAmount = min($saldo, $mainDue);
+
+            // Kurangi saldo
+            CustomerBalance::create([
+                'customer_id' => $customer->id,
+                'amount' => -min($saldo, $totalAll),
+                'description' => 'Pembayaran Invoice #INV-' . str_pad($invoice->id, 5, '0', STR_PAD_LEFT),
+            ]);
+        } else {
+            // Bayar manual
+            $payAmount = (int) $request->amount;
+            if ($payAmount <= 0) {
+                return response()->json(['success' => false, 'message' => 'Jumlah pembayaran harus lebih dari 0.']);
+            }
+        }
+
+        // === Proses pembayaran tambahan untuk bulan sebelumnya ===
+        $additionalMessages = [];
+        foreach ($additionalPayments as $ap) {
+            $addInv = Invoice::find($ap['invoice_id']);
+            if (!$addInv || $addInv->customer_id != $customer->id) continue;
+            if ($addInv->status == 'paid') continue;
+
+            $addPrice = $addInv->price > 0 ? $addInv->price : ($customer->monthly_price ?? 0);
+            $addDue = $addPrice - $addInv->paid_amount;
+            $addPay = min((int) $ap['amount'], $addDue);
+
+            if ($addPay <= 0) continue;
+
+            $newPaid = $addInv->paid_amount + $addPay;
+            if ($newPaid >= $addPrice) {
+                $addInv->update([
+                    'status' => 'paid',
+                    'paid_amount' => $addPrice,
+                    'outstanding' => 0,
+                ]);
+                $additionalMessages[] = Carbon::parse($addInv->due_date)->locale('id')->isoFormat('MMM Y') . ': Lunas';
+            } else {
+                $addInv->update([
+                    'paid_amount' => $newPaid,
+                ]);
+                $additionalMessages[] = Carbon::parse($addInv->due_date)->locale('id')->isoFormat('MMM Y') . ': Rp ' . number_format($addPay, 0, ',', '.');
+            }
+        }
+
+        // === Proses pembayaran invoice utama ===
+        if ($payAmount >= $mainDue) {
+            // Lunas atau lebih
+            $excess = $payAmount - $mainDue;
+            $invoice->update([
+                'status' => 'paid',
+                'paid_amount' => $mainDue,
+                'outstanding' => 0,
+            ]);
+
+            // Kelebihan masuk ke saldo
+            if ($excess > 0) {
+                CustomerBalance::create([
+                    'customer_id' => $customer->id,
+                    'amount' => $excess,
+                    'description' => 'Kelebihan bayar Invoice #INV-' . str_pad($invoice->id, 5, '0', STR_PAD_LEFT),
+                ]);
+            }
+
+            // Aktifkan di Mikrotik
+            $customer->update(['is_active' => true]);
+            try {
+                if ($this->mikrotik->isConnected()) {
+                    $this->mikrotik->setSecretStatus($customer->pppoe_username, 'enabled');
+                }
+            } catch (\Exception $e) { /* ignore */ }
+
+            $msg = 'Invoice LUNAS!';
+            if ($excess > 0) {
+                $msg .= ' Kelebihan Rp ' . number_format($excess, 0, ',', '.') . ' masuk ke saldo.';
+            }
+            if (!empty($additionalMessages)) {
+                $msg .= ' Tunggakan: ' . implode(', ', $additionalMessages) . '.';
+            }
+
+            return response()->json(['success' => true, 'message' => $msg, 'status' => 'paid']);
+        } else {
+            // Kurang bayar
+            $remaining = $mainDue - $payAmount;
+            $invoice->update([
+                'paid_amount' => $payAmount,
+                'outstanding' => $remaining,
+                // status tetap unpaid
+            ]);
+
+            $msg = 'Pembayaran sebagian diterima. Kurang bayar bulan ini: Rp ' . number_format($remaining, 0, ',', '.');
+            if (!empty($additionalMessages)) {
+                $msg .= ' Tunggakan: ' . implode(', ', $additionalMessages) . '.';
+            }
+
+            return response()->json([
+                'success' => true,
+                'message' => $msg,
+                'status' => 'partial',
+            ]);
+        }
+    }
+
+    /**
      * BATALKAN PEMBAYARAN (KOREKSI + KIRIM WA)
      */
     public function cancelPayment($id)
@@ -406,18 +627,52 @@ class BillingController extends Controller
         $invoice = Invoice::with('customer')->findOrFail($id);
         $customer = $invoice->customer;
 
-        if ($invoice->status != 'paid')
+        if ($invoice->status != 'paid' && $invoice->paid_amount <= 0) {
+            if (request()->ajax()) return response()->json(['success' => false, 'message' => 'Gagal. Invoice tidak memiliki pembayaran yang dapat dibatalkan.']);
             return back()->with('error', 'Gagal.');
+        }
 
         // Validasi Operator
         if (Auth::user()->role == 'operator') {
             if ($customer->operator_id != Auth::user()->id) {
+                if (request()->ajax()) return response()->json(['success' => false, 'message' => 'Akses Ditolak.']);
                 return back()->with('error', 'Akses Ditolak.');
             }
         }
 
+        // Hitung ulang outstanding (akumulasi kurang bayar sebelum invoice ini)
+        $invoiceDate = \Carbon\Carbon::parse($invoice->due_date);
+        $month = $invoiceDate->month;
+        $year = $invoiceDate->year;
+
+        $previousInvoices = Invoice::where('customer_id', $invoice->customer_id)
+            ->where('status', 'unpaid')
+            ->where('id', '!=', $invoice->id)
+            ->where(function($q) use ($month, $year) {
+                $q->whereYear('due_date', '<', $year)
+                  ->orWhere(function($q2) use ($month, $year) {
+                      $q2->whereYear('due_date', $year)->whereMonth('due_date', '<', $month);
+                  });
+            })
+            ->get();
+
+        $akumulasiKurangBayar = 0;
+        foreach ($previousInvoices as $prevInv) {
+            $prevPrice = $prevInv->price > 0 ? $prevInv->price : ($prevInv->customer->monthly_price ?? 0);
+            if ($prevPrice == 0) continue; 
+            
+            $unpaid = $prevPrice - $prevInv->paid_amount;
+            $akumulasiKurangBayar += $unpaid;
+        }
+        if ($akumulasiKurangBayar < 0) $akumulasiKurangBayar = 0;
+
         // Update Database
-        $invoice->update(['status' => 'unpaid']);
+        $invoice->update([
+            'status' => 'unpaid',
+            'paid_amount' => 0,
+            'outstanding' => $akumulasiKurangBayar
+        ]);
+        
         $customer->update(['is_active' => false]);
 
         // Eksekusi Mikrotik
@@ -426,7 +681,7 @@ class BillingController extends Controller
         try {
             if ($this->mikrotik->isConnected()) {
                 $this->mikrotik->setSecretStatus($userPppoe, 'disabled');
-                $this->mikrotik->kickUser($userPppoe);
+                // $this->mikrotik->kickUser($userPppoe); // Disable kick active connection
                 $pesanMikrotik = "Mikrotik: Disabled.";
             }
         } catch (\Exception $e) {
@@ -449,7 +704,100 @@ class BillingController extends Controller
             $pesanWA = $waResult['status'] ? "WA Terkirim." : "WA Gagal.";
         }
 
-        return back()->with('warning', "Pembayaran DIBATALKAN! $pesanMikrotik $pesanWA");
+        $msg = "Pembayaran DIBATALKAN! $pesanMikrotik $pesanWA";
+        
+        if (request()->ajax()) {
+            return response()->json([
+                'success' => true,
+                'message' => $msg
+            ]);
+        }
+
+        return back()->with('warning', $msg);
+    }
+
+    /**
+     * AJAX: Get unpaid months for a specific invoice's customer (same year, prior months)
+     */
+    public function getUnpaidMonths($id)
+    {
+        $invoice = Invoice::with('customer')->findOrFail($id);
+        $invoiceDate = Carbon::parse($invoice->due_date);
+        $month = $invoiceDate->month;
+        $year = $invoiceDate->year;
+
+        $unpaidInvoices = Invoice::where('customer_id', $invoice->customer_id)
+            ->where('status', 'unpaid')
+            ->where('id', '!=', $invoice->id)
+            ->where(function($q) use ($month, $year) {
+                $q->whereYear('due_date', $year)
+                  ->whereMonth('due_date', '<', $month);
+            })
+            ->orderBy('due_date', 'asc')
+            ->get();
+
+        $data = [];
+        foreach ($unpaidInvoices as $inv) {
+            $price = $inv->price > 0 ? $inv->price : ($inv->customer->monthly_price ?? 0);
+            if ($price == 0) continue;
+            
+            $kurangBayar = $price - $inv->paid_amount;
+            if ($kurangBayar <= 0) continue;
+
+            $data[] = [
+                'id' => $inv->id,
+                'periode' => Carbon::parse($inv->due_date)->locale('id')->isoFormat('MMMM Y'),
+                'tagihan' => $price,
+                'dibayar' => $inv->paid_amount,
+                'kurang_bayar' => $kurangBayar,
+            ];
+        }
+
+        return response()->json(['success' => true, 'data' => $data]);
+    }
+
+    /**
+     * AJAX: Get payment history for a customer
+     */
+    public function customerHistory($id)
+    {
+        $invoices = Invoice::where('customer_id', $id)
+            ->orderBy('due_date', 'desc')
+            ->get();
+
+        $history = [];
+        $totalTunggakan = 0;
+
+        foreach ($invoices as $inv) {
+            $price = $inv->price > 0 ? $inv->price : ($inv->customer->monthly_price ?? 0);
+            
+            $status = $inv->status;
+            if ($price == 0) {
+                $status = 'paid';
+            }
+
+            $unpaid = 0;
+            if ($status == 'unpaid') {
+                $unpaid = $price - $inv->paid_amount;
+                $totalTunggakan += $unpaid;
+            }
+
+            $history[] = [
+                'id' => $inv->id,
+                'no_invoice' => '#INV-' . str_pad($inv->id, 5, '0', STR_PAD_LEFT),
+                'periode' => Carbon::parse($inv->due_date)->locale('id')->isoFormat('MMMM Y'),
+                'tagihan' => $price,
+                'dibayar' => $status == 'paid' ? ($inv->paid_amount > 0 ? $inv->paid_amount : $price) : $inv->paid_amount,
+                'kurang' => $unpaid,
+                'status' => $status,
+            ];
+        }
+
+        return response()->json([
+            'success' => true,
+            'data' => $history,
+            'total_tunggakan' => $totalTunggakan
+        ]);
     }
 
     public function destroy($id)
@@ -526,22 +874,93 @@ class BillingController extends Controller
             if ($invoice->customer->operator_id != Auth::user()->id)
                 abort(403);
         }
+        // Get company based on authenticated user's role
+        $user = Auth::user();
+        $companyAdminId = $user->isOperator() ? $user->parent_id : $user->id;
         $company = Company::withoutGlobalScope(\App\Scopes\TenantScope::class)
-            ->where('admin_id', $invoice->admin_id)
+            ->where('admin_id', $companyAdminId)
             ->first();
 
-        // Convert Logo to Base64 (Optional for print, but keeps view logic simple)
+        // Fallback to superadmin's company if admin has missing data
+        $fallbackCompany = null;
+        if (!$user->isSuperAdmin()) {
+            $fallbackCompany = Company::withoutGlobalScope(\App\Scopes\TenantScope::class)
+                ->whereHas('admin', function ($q) {
+                    $q->where('role', 'superadmin');
+                })
+                ->first();
+        }
+
+        // Per-field fallback: admin's own data → superadmin's data → default
+        $logoSource = ($company && !empty($company->logo_path)) ? $company : $fallbackCompany;
+        $companyName = (!empty($company->company_name) ? $company->company_name : null)
+            ?? ($fallbackCompany->company_name ?? 'BillNesia');
+        $companyAddress = (!empty($company->address) ? $company->address : null)
+            ?? ($fallbackCompany->address ?? '');
+        $companyPhone = (!empty($company->phone) ? $company->phone : null)
+            ?? ($fallbackCompany->phone ?? '');
+        $companyEmail = (!empty($company->email) ? $company->email : null)
+            ?? ($fallbackCompany->email ?? '');
+
+        // Convert Logo to Base64 using Storage disk (works on shared hosting)
         $logoBase64 = null;
-        if ($company && !empty($company->logo_path)) {
-            $path = public_path('uploads/' . $company->logo_path);
-            if (file_exists($path)) {
-                $type = pathinfo($path, PATHINFO_EXTENSION);
-                $data = file_get_contents($path);
+        $hostingDisk = \Illuminate\Support\Facades\Storage::disk('hosting');
+        if ($logoSource && !empty($logoSource->logo_path)) {
+            if ($hostingDisk->exists($logoSource->logo_path)) {
+                $type = pathinfo($logoSource->logo_path, PATHINFO_EXTENSION);
+                $data = $hostingDisk->get($logoSource->logo_path);
                 $logoBase64 = 'data:image/' . $type . ';base64,' . base64_encode($data);
             }
         }
 
-        return view('billing.invoice', compact('invoice', 'company', 'logoBase64'));
+        // If still no logo, use BillNesia default logo
+        if (!$logoBase64) {
+            $billnesiaPath = rtrim($hostingDisk->path(''), '/\\') . '/../img/billnesia_logo.png';
+            if (file_exists($billnesiaPath)) {
+                $data = file_get_contents($billnesiaPath);
+                $logoBase64 = 'data:image/png;base64,' . base64_encode($data);
+            }
+        }
+
+        // Hitung akumulasi kurang bayar dari bulan-bulan sebelumnya
+        $invoiceDate = \Carbon\Carbon::parse($invoice->due_date);
+        $month = $invoiceDate->month;
+        $year = $invoiceDate->year;
+
+        $previousInvoices = Invoice::where('customer_id', $invoice->customer_id)
+            ->where('status', 'unpaid')
+            ->where('id', '!=', $invoice->id)
+            ->where(function($q) use ($month, $year) {
+                $q->whereYear('due_date', '<', $year)
+                  ->orWhere(function($q2) use ($month, $year) {
+                      $q2->whereYear('due_date', $year)->whereMonth('due_date', '<', $month);
+                  });
+            })
+            ->get();
+
+        $akumulasiKurangBayar = 0;
+        foreach ($previousInvoices as $prevInv) {
+            $prevPrice = $prevInv->price > 0 ? $prevInv->price : ($prevInv->customer->monthly_price ?? 0);
+            // Jika tagihan 0, anggap lunas (tidak ada kurang bayar)
+            if ($prevPrice == 0) continue; 
+            
+            $unpaid = $prevPrice - $prevInv->paid_amount;
+            $akumulasiKurangBayar += $unpaid;
+        }
+
+        // Pastikan tidak negatif jika ada anomali data
+        if ($akumulasiKurangBayar < 0) $akumulasiKurangBayar = 0;
+
+        return view('billing.invoice', compact(
+            'invoice',
+            'company',
+            'logoBase64',
+            'companyName',
+            'companyAddress',
+            'companyPhone',
+            'companyEmail',
+            'akumulasiKurangBayar'
+        ));
     }
 
     public function bulkUpdateDueDate(Request $request)

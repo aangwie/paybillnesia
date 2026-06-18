@@ -11,20 +11,33 @@ use App\Models\RouterSetting;
 class MikrotikService
 {
     protected $client;
-    protected $initialized = false;
 
     public function __construct()
     {
-        // Lazy: don't connect here, defer until first usage
+        // Connection will be initialized lazily when needed
     }
 
-    /**
-     * Lazily initialize the connection when first needed.
-     */
-    protected function ensureConnected()
+    protected function initialize($config = null)
     {
-        if ($this->initialized) return;
-        $this->initialized = true;
+        // If config is provided, we force a new client for that specific router
+        if ($config instanceof RouterSetting) {
+            try {
+                $this->client = new Client([
+                    'host' => $config->host,
+                    'user' => $config->username,
+                    'pass' => $config->password,
+                    'port' => (int) $config->port,
+                    'timeout' => 5,
+                ]);
+            } catch (ConnectException | ClientException $e) {
+                $this->client = null;
+            }
+            return;
+        }
+
+        if ($this->client !== null) {
+            return;
+        }
 
         try {
             // AMBIL YANG STATUSNYA AKTIF
@@ -32,11 +45,10 @@ class MikrotikService
 
             // Jika tidak ada yang aktif, ambil yang pertama saja (fallback)
             if (!$config) {
-                $config = RouterSetting::first();
+                $config = RouterSetting::withoutGlobalScopes()->where('is_active', true)->first();
             }
 
             if (!$config) {
-                $this->client = null;
                 return;
             }
 
@@ -47,7 +59,7 @@ class MikrotikService
                 'port' => (int) $config->port,
                 'timeout' => 5,
             ]);
-        } catch (\Throwable $e) {
+        } catch (ConnectException | ClientException $e) {
             $this->client = null;
         }
     }
@@ -55,7 +67,7 @@ class MikrotikService
     // Cek status koneksi
     public function isConnected()
     {
-        $this->ensureConnected();
+        $this->initialize();
         return $this->client !== null;
     }
 
@@ -70,13 +82,40 @@ class MikrotikService
         if (!$this->isConnected())
             return [];
 
-        try {
-            // /ppp/active/print
-            $query = new Query('/ppp/active/print');
-            return $this->client->query($query)->read();
-        } catch (\Throwable $e) {
-            return [];
+        // /ppp/active/print
+        $query = new Query('/ppp/active/print');
+        return $this->client->query($query)->read();
+    }
+
+    /**
+     * Ambil semua user online dari SEMUA router yang aktif
+     */
+    public function getAllActiveUsers()
+    {
+        $routers = RouterSetting::where('is_active', true)->get();
+        if ($routers->isEmpty()) {
+            // Fallback for superadmin or if no scope applied
+            $routers = RouterSetting::withoutGlobalScopes()->where('is_active', true)->get();
         }
+
+        $allActives = [];
+        foreach ($routers as $router) {
+            $this->initialize($router);
+            if ($this->client) {
+                try {
+                    $query = new Query('/ppp/active/print');
+                    $actives = $this->client->query($query)->read();
+                    if (is_array($actives)) {
+                        foreach ($actives as $active) {
+                            $allActives[] = $active;
+                        }
+                    }
+                } catch (\Exception $e) {
+                    // Skip failed router
+                }
+            }
+        }
+        return $allActives;
     }
 
     // Ambil daftar semua user terdaftar (Secret)
@@ -85,13 +124,9 @@ class MikrotikService
         if (!$this->isConnected())
             return [];
 
-        try {
-            // /ppp/secret/print
-            $query = new Query('/ppp/secret/print');
-            return $this->client->query($query)->read();
-        } catch (\Throwable $e) {
-            return [];
-        }
+        // /ppp/secret/print
+        $query = new Query('/ppp/secret/print');
+        return $this->client->query($query)->read();
     }
 
     // Logic untuk memutus koneksi user
@@ -100,27 +135,23 @@ class MikrotikService
         if (!$this->isConnected())
             return false;
 
-        try {
-            // 1. Cari ID koneksi aktif berdasarkan nama user
-            $queryFind = (new Query('/ppp/active/print'))
-                ->where('name', $username);
+        // 1. Cari ID koneksi aktif berdasarkan nama user
+        $queryFind = (new Query('/ppp/active/print'))
+            ->where('name', $username);
 
-            $activeUser = $this->client->query($queryFind)->read();
+        $activeUser = $this->client->query($queryFind)->read();
 
-            // Jika user ditemukan sedang online
-            if (!empty($activeUser)) {
-                // Ambil .id (contoh: *1A)
-                $id = $activeUser[0]['.id'];
+        // Jika user ditemukan sedang online
+        if (!empty($activeUser)) {
+            // Ambil .id (contoh: *1A)
+            $id = $activeUser[0]['.id'];
 
-                // 2. Eksekusi perintah remove
-                $queryKick = (new Query('/ppp/active/remove'))
-                    ->equal('.id', $id);
+            // 2. Eksekusi perintah remove
+            $queryKick = (new Query('/ppp/active/remove'))
+                ->equal('.id', $id);
 
-                $this->client->query($queryKick)->read();
-                return true;
-            }
-        } catch (\Throwable $e) {
-            return false;
+            $this->client->query($queryKick)->read();
+            return true;
         }
 
         return false; // User tidak sedang online
@@ -134,26 +165,22 @@ class MikrotikService
         if (!$this->isConnected())
             return false;
 
-        try {
-            // 1. Cari ID Secret berdasarkan username
-            $queryFind = (new Query('/ppp/secret/print'))
-                ->where('name', $username);
-            $secret = $this->client->query($queryFind)->read();
+        // 1. Cari ID Secret berdasarkan username
+        $queryFind = (new Query('/ppp/secret/print'))
+            ->where('name', $username);
+        $secret = $this->client->query($queryFind)->read();
 
-            if (!empty($secret)) {
-                $id = $secret[0]['.id'];
-                $value = ($status === 'disabled') ? 'yes' : 'no';
+        if (!empty($secret)) {
+            $id = $secret[0]['.id'];
+            $value = ($status === 'disabled') ? 'yes' : 'no';
 
-                // 2. Set disabled=yes/no
-                $querySet = (new Query('/ppp/secret/set'))
-                    ->equal('.id', $id)
-                    ->equal('disabled', $value);
+            // 2. Set disabled=yes/no
+            $querySet = (new Query('/ppp/secret/set'))
+                ->equal('.id', $id)
+                ->equal('disabled', $value);
 
-                $this->client->query($querySet)->read();
-                return true;
-            }
-        } catch (\Throwable $e) {
-            return false;
+            $this->client->query($querySet)->read();
+            return true;
         }
         return false;
     }
@@ -163,12 +190,8 @@ class MikrotikService
     {
         if (!$this->isConnected())
             return [];
-        try {
-            $query = new Query('/ppp/profile/print');
-            return $this->client->query($query)->read();
-        } catch (\Throwable $e) {
-            return [];
-        }
+        $query = new Query('/ppp/profile/print');
+        return $this->client->query($query)->read();
     }
 
     // Tambah User Baru ke Mikrotik
@@ -177,19 +200,15 @@ class MikrotikService
         if (!$this->isConnected())
             return false;
 
-        try {
-            $query = (new Query('/ppp/secret/add'))
-                ->equal('name', $data['username'])
-                ->equal('password', $data['password'])
-                ->equal('service', 'pppoe')
-                ->equal('profile', $data['profile'])
-                ->equal('comment', $data['comment'] ?? '');
+        $query = (new Query('/ppp/secret/add'))
+            ->equal('name', $data['username'])
+            ->equal('password', $data['password'])
+            ->equal('service', 'pppoe')
+            ->equal('profile', $data['profile'])
+            ->equal('comment', $data['comment'] ?? '');
 
-            $this->client->query($query)->read();
-            return true;
-        } catch (\Throwable $e) {
-            return false;
-        }
+        $this->client->query($query)->read();
+        return true;
     }
 
     // Hapus User dari Mikrotik
@@ -198,19 +217,15 @@ class MikrotikService
         if (!$this->isConnected())
             return false;
 
-        try {
-            // Cari ID dulu
-            $queryFind = (new Query('/ppp/secret/print'))->where('name', $username);
-            $user = $this->client->query($queryFind)->read();
+        // Cari ID dulu
+        $queryFind = (new Query('/ppp/secret/print'))->where('name', $username);
+        $user = $this->client->query($queryFind)->read();
 
-            if (!empty($user)) {
-                $id = $user[0]['.id'];
-                $queryRemove = (new Query('/ppp/secret/remove'))->equal('.id', $id);
-                $this->client->query($queryRemove)->read();
-                return true;
-            }
-        } catch (\Throwable $e) {
-            return false;
+        if (!empty($user)) {
+            $id = $user[0]['.id'];
+            $queryRemove = (new Query('/ppp/secret/remove'))->equal('.id', $id);
+            $this->client->query($queryRemove)->read();
+            return true;
         }
         return false;
     }
@@ -220,14 +235,10 @@ class MikrotikService
     {
         if (!$this->isConnected())
             return [];
-        try {
-            // Ambil hanya yang tipe ethernet atau bridge (opsional filter)
-            // Disini kita ambil semua agar fleksibel
-            $query = new Query('/interface/print');
-            return $this->client->query($query)->read();
-        } catch (\Throwable $e) {
-            return [];
-        }
+        // Ambil hanya yang tipe ethernet atau bridge (opsional filter)
+        // Disini kita ambil semua agar fleksibel
+        $query = new Query('/interface/print');
+        return $this->client->query($query)->read();
     }
 
     // Ambil Traffic Realtime (Monitor Traffic)
@@ -236,22 +247,18 @@ class MikrotikService
         if (!$this->isConnected())
             return ['rx' => 0, 'tx' => 0];
 
-        try {
-            // Perintah monitor-traffic dengan argumen 'once' agar tidak streaming
-            $query = (new Query('/interface/monitor-traffic'))
-                ->equal('interface', $interfaceName)
-                ->equal('once');
+        // Perintah monitor-traffic dengan argumen 'once' agar tidak streaming
+        $query = (new Query('/interface/monitor-traffic'))
+            ->equal('interface', $interfaceName)
+            ->equal('once');
 
-            $result = $this->client->query($query)->read();
+        $result = $this->client->query($query)->read();
 
-            if (!empty($result)) {
-                return [
-                    'rx' => isset($result[0]['rx-bits-per-second']) ? $result[0]['rx-bits-per-second'] : 0,
-                    'tx' => isset($result[0]['tx-bits-per-second']) ? $result[0]['tx-bits-per-second'] : 0,
-                ];
-            }
-        } catch (\Throwable $e) {
-            return ['rx' => 0, 'tx' => 0];
+        if (!empty($result)) {
+            return [
+                'rx' => isset($result[0]['rx-bits-per-second']) ? $result[0]['rx-bits-per-second'] : 0,
+                'tx' => isset($result[0]['tx-bits-per-second']) ? $result[0]['tx-bits-per-second'] : 0,
+            ];
         }
 
         return ['rx' => 0, 'tx' => 0];
@@ -263,29 +270,25 @@ class MikrotikService
         if (!$this->isConnected())
             return false;
 
-        try {
-            // 1. Cari ID Secret berdasarkan Username
-            $queryFind = (new Query('/ppp/secret/print'))->where('name', $username);
-            $user = $this->client->query($queryFind)->read();
+        // 1. Cari ID Secret berdasarkan Username
+        $queryFind = (new Query('/ppp/secret/print'))->where('name', $username);
+        $user = $this->client->query($queryFind)->read();
 
-            if (empty($user))
-                return false;
-
-            $id = $user[0]['.id'];
-
-            // 2. Lakukan Update (Set)
-            // $data adalah array, misal: ['profile' => 'up-10mbps', 'password' => '123']
-            $queryUpdate = (new Query('/ppp/secret/set'))->equal('.id', $id);
-
-            foreach ($data as $key => $value) {
-                $queryUpdate->equal($key, $value);
-            }
-
-            $this->client->query($queryUpdate)->read();
-            return true;
-        } catch (\Throwable $e) {
+        if (empty($user))
             return false;
+
+        $id = $user[0]['.id'];
+
+        // 2. Lakukan Update (Set)
+        // $data adalah array, misal: ['profile' => 'up-10mbps', 'password' => '123']
+        $queryUpdate = (new Query('/ppp/secret/set'))->equal('.id', $id);
+
+        foreach ($data as $key => $value) {
+            $queryUpdate->equal($key, $value);
         }
+
+        $this->client->query($queryUpdate)->read();
+        return true;
     }
 
     // --- MONITOR METHODS ---
@@ -295,12 +298,8 @@ class MikrotikService
     {
         if (!$this->isConnected())
             return [];
-        try {
-            $query = new Query('/ip/hotspot/active/print');
-            return $this->client->query($query)->read();
-        } catch (\Throwable $e) {
-            return [];
-        }
+        $query = new Query('/ip/hotspot/active/print');
+        return $this->client->query($query)->read();
     }
 
     // Ambil daftar semua user Hotspot terdaftar
@@ -308,12 +307,8 @@ class MikrotikService
     {
         if (!$this->isConnected())
             return [];
-        try {
-            $query = new Query('/ip/hotspot/user/print');
-            return $this->client->query($query)->read();
-        } catch (\Throwable $e) {
-            return [];
-        }
+        $query = new Query('/ip/hotspot/user/print');
+        return $this->client->query($query)->read();
     }
 
     // Ambil daftar DHCP Leases
@@ -321,12 +316,8 @@ class MikrotikService
     {
         if (!$this->isConnected())
             return [];
-        try {
-            $query = new Query('/ip/dhcp-server/lease/print');
-            return $this->client->query($query)->read();
-        } catch (\Throwable $e) {
-            return [];
-        }
+        $query = new Query('/ip/dhcp-server/lease/print');
+        return $this->client->query($query)->read();
     }
 
     // Ambil daftar Simple Queues
@@ -334,12 +325,8 @@ class MikrotikService
     {
         if (!$this->isConnected())
             return [];
-        try {
-            $query = new Query('/queue/simple/print');
-            return $this->client->query($query)->read();
-        } catch (\Throwable $e) {
-            return [];
-        }
+        $query = new Query('/queue/simple/print');
+        return $this->client->query($query)->read();
     }
 
     // --- HOTSPOT MANAGEMENT ---
@@ -348,12 +335,8 @@ class MikrotikService
     {
         if (!$this->isConnected())
             return [];
-        try {
-            $query = new Query('/ip/hotspot/user/profile/print');
-            return $this->client->query($query)->read();
-        } catch (\Throwable $e) {
-            return [];
-        }
+        $query = new Query('/ip/hotspot/user/profile/print');
+        return $this->client->query($query)->read();
     }
 
     // Ambil daftar hotspot servers
@@ -361,12 +344,8 @@ class MikrotikService
     {
         if (!$this->isConnected())
             return [];
-        try {
-            $query = (new Query('/ip/hotspot/print'));
-            return $this->client->query($query)->read();
-        } catch (\Throwable $e) {
-            return [];
-        }
+        $query = (new Query('/ip/hotspot/print'));
+        return $this->client->query($query)->read();
     }
 
     public function addHotspotUser($data)
@@ -374,19 +353,15 @@ class MikrotikService
         if (!$this->isConnected())
             return false;
 
-        try {
-            $query = (new Query('/ip/hotspot/user/add'))
-                ->equal('name', $data['name'])
-                ->equal('password', $data['password'])
-                ->equal('profile', $data['profile'])
-                ->equal('limit-uptime', $data['limit_uptime'] ?? '0')
-                ->equal('comment', $data['comment'] ?? '');
+        $query = (new Query('/ip/hotspot/user/add'))
+            ->equal('name', $data['name'])
+            ->equal('password', $data['password'])
+            ->equal('profile', $data['profile'])
+            ->equal('limit-uptime', $data['limit_uptime'] ?? '0')
+            ->equal('comment', $data['comment'] ?? '');
 
-            $this->client->query($query)->read();
-            return true;
-        } catch (\Throwable $e) {
-            return false;
-        }
+        $this->client->query($query)->read();
+        return true;
     }
 
     public function removeHotspotUser($name)
@@ -394,63 +369,15 @@ class MikrotikService
         if (!$this->isConnected())
             return false;
 
-        try {
-            $queryFind = (new Query('/ip/hotspot/user/print'))->where('name', $name);
-            $user = $this->client->query($queryFind)->read();
+        $queryFind = (new Query('/ip/hotspot/user/print'))->where('name', $name);
+        $user = $this->client->query($queryFind)->read();
 
-            if (!empty($user)) {
-                $id = $user[0]['.id'];
-                $queryRemove = (new Query('/ip/hotspot/user/remove'))->equal('.id', $id);
-                $this->client->query($queryRemove)->read();
-                return true;
-            }
-        } catch (\Throwable $e) {
-            return false;
+        if (!empty($user)) {
+            $id = $user[0]['.id'];
+            $queryRemove = (new Query('/ip/hotspot/user/remove'))->equal('.id', $id);
+            $this->client->query($queryRemove)->read();
+            return true;
         }
         return false;
-    }
-
-    // --- IDENTITY & CONNECTION CHECK ---
-
-    /**
-     * Get MikroTik identity name from current connection
-     */
-    public function getIdentity()
-    {
-        if (!$this->isConnected())
-            return null;
-
-        try {
-            $query = new Query('/system/identity/print');
-            $result = $this->client->query($query)->read();
-            return !empty($result) ? ($result[0]['name'] ?? null) : null;
-        } catch (\Throwable $e) {
-            return null;
-        }
-    }
-
-    /**
-     * Static method to check connection to a specific router and get its identity.
-     * Returns ['connected' => bool, 'identity' => string|null]
-     */
-    public static function checkRouterConnection($host, $user, $pass, $port = 8728)
-    {
-        try {
-            $client = new Client([
-                'host' => $host,
-                'user' => $user,
-                'pass' => $pass,
-                'port' => (int) $port,
-                'timeout' => 3,
-            ]);
-
-            $query = new Query('/system/identity/print');
-            $result = $client->query($query)->read();
-            $identity = !empty($result) ? ($result[0]['name'] ?? null) : null;
-
-            return ['connected' => true, 'identity' => $identity];
-        } catch (\Throwable $e) {
-            return ['connected' => false, 'identity' => null];
-        }
     }
 }

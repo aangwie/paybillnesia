@@ -15,21 +15,18 @@ class TenantScope implements Scope
      */
     public function apply(Builder $builder, Model $model): void
     {
-        if (Auth::check()) {
-            $user = Auth::user();
+        $user = Auth::user() ?? (Auth::guard('sanctum')->check() ? Auth::guard('sanctum')->user() : null);
+        \Illuminate\Support\Facades\Log::info('TenantScope Triggered. User ID: ' . ($user ? $user->id : 'NULL'));
 
-            if ($user->isSuperAdmin()) {
-                // Superadmin sees everything.
-                // Optional: Check if we want to filter by specific admin if viewing their "dashboard" context?
-                // For now, global view.
-                return;
-            }
+        if ($user) {
+            $tableName = $model->getTable();
 
-            if ($user->isAdmin()) {
-                $builder->where('admin_id', $user->id);
-            } elseif ($user->isOperator()) {
-                // Operator sees data belonging to their Admin (parent)
-                $builder->where('admin_id', $user->parent_id);
+            if ($user->role === 'superadmin' || $user->role === 'admin') {
+                // By default, both see only their own records
+                $builder->where($tableName . '.admin_id', $user->id);
+            } elseif ($user->role === 'operator') {
+                // Operator sees data from their parent admin
+                $builder->where($tableName . '.admin_id', $user->parent_id);
             }
         }
     }

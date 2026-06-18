@@ -33,7 +33,12 @@ class WhatsappController extends Controller
             }
         }
 
-        $setting = WhatsappSetting::first();
+        // Ambil setting milik admin sendiri (termasuk superadmin)
+        if ($user->role == 'superadmin') {
+            $setting = WhatsappSetting::withoutGlobalScopes()->where('admin_id', $user->id)->first();
+        } else {
+            $setting = WhatsappSetting::first();
+        }
 
         // Global Adsense: Fetch any record that has adsense content (bypassing all scopes)
         $globalAdsense = WhatsappSetting::withoutGlobalScopes()
@@ -78,7 +83,8 @@ class WhatsappController extends Controller
         $rules = [
             'wa_provider' => 'required|in:api,gateway',
             'target_url' => 'nullable|url',
-            'api_key' => 'nullable|string',
+            'api_key_external' => 'nullable|string',
+            'api_key_gateway' => 'nullable|string',
             'sender_number' => 'nullable|string',
             'wa_gateway_url' => 'nullable|url',
         ];
@@ -90,10 +96,30 @@ class WhatsappController extends Controller
 
         $data = $request->validate($rules);
 
-        $setting = WhatsappSetting::first();
+        // Auto generate API Key Gateway if empty and provider is gateway
+        if ($user->role == 'superadmin') {
+            $setting = WhatsappSetting::withoutGlobalScopes()->where('admin_id', $user->id)->first();
+        } else {
+            $setting = WhatsappSetting::first();
+        }
+
+        // Auto generate API Key Gateway if empty and provider is gateway
+        if ($data['wa_provider'] === 'gateway' && empty($data['api_key_gateway'])) {
+            $data['api_key_gateway'] = \Illuminate\Support\Str::random(32);
+        }
+
+        // Always ensure a unique Gateway Session exists
+        if (!$setting || empty($setting->gateway_session)) {
+            $data['gateway_session'] = 'sess_' . \Illuminate\Support\Str::random(12);
+        }
+
         if ($setting) {
             $setting->update($data);
         } else {
+            // Set admin_id eksplisit jika superadmin (karena trait BelongsToTenant biasanya handle ini tapi kita pastikan)
+            if ($user->role == 'superadmin') {
+                $data['admin_id'] = $user->id;
+            }
             WhatsappSetting::create($data);
         }
 
@@ -105,7 +131,8 @@ class WhatsappController extends Controller
     {
         $request->validate(['target' => 'required', 'message' => 'required']);
 
-        $result = $this->waService->send($request->target, $request->message);
+        $adminId = auth()->id();
+        $result = $this->waService->send($request->target, $request->message, $adminId);
 
         if ($result['status']) {
             return back()->with('success', 'Pesan terkirim! Response: ' . $result['response']);
@@ -146,7 +173,8 @@ class WhatsappController extends Controller
                 $msg = str_replace('{name}', $target['name'], $messageTemplate);
                 $msg = str_replace('{tagihan}', number_format($target['bill']), $msg);
 
-                $this->waService->send($target['phone'], $msg);
+                $adminId = auth()->id();
+                $this->waService->send($target['phone'], $msg, $adminId);
                 $count++;
             }
         }
@@ -178,7 +206,8 @@ class WhatsappController extends Controller
                 $msg = str_replace('{tagihan}', number_format($customer->monthly_price, 0, ',', '.'), $msg);
 
                 // Kirim Pesan
-                $result = $this->waService->send($customer->phone, $msg);
+                $adminId = auth()->id();
+                $result = $this->waService->send($customer->phone, $msg, $adminId);
 
                 if ($result['status']) {
                     $successCount++;
@@ -228,7 +257,8 @@ class WhatsappController extends Controller
 
         // Kirim WA
         try {
-            $result = $this->waService->send($customer->phone, $msg);
+            $adminId = auth()->id();
+            $result = $this->waService->send($customer->phone, $msg, $adminId);
 
             if ($result['status']) {
                 return response()->json([
@@ -411,6 +441,91 @@ class WhatsappController extends Controller
         return response()->json(['status' => true, 'message' => 'Jadwal pesan berhasil dihapus.']);
     }
 
+    // Schedule or immediately process unpaid broadcast
+    public function scheduleUnpaidBroadcast(Request $request)
+    {
+        $request->validate([
+            'message' => 'required|string',
+            'whatsapp_age' => 'required|in:1-6,6-12,12+',
+            'schedule_mode' => 'required|in:now,scheduled',
+            'scheduled_at' => 'required_if:schedule_mode,scheduled|nullable|date',
+        ]);
+
+        $user = auth()->user();
+        $whatsappAge = $request->whatsapp_age;
+        $maxRecipients = ScheduledMessage::getMaxRecipients($whatsappAge);
+        $adminId = $request->admin_id;
+
+        // Get unpaid customer IDs
+        $query = Customer::whereNotNull('phone')
+            ->where('phone', '!=', '')
+            ->whereHas('invoices', function ($q) {
+                $q->where('status', '!=', 'paid');
+            });
+
+        if ($user->role == 'superadmin' && $adminId) {
+            $query->where('admin_id', $adminId);
+        }
+
+        $customerIds = $query->limit($maxRecipients)->pluck('id')->toArray();
+
+        if (empty($customerIds)) {
+            return response()->json([
+                'status' => false,
+                'message' => 'Tidak ada pelanggan dengan tagihan belum lunas.'
+            ]);
+        }
+
+        // Enforce limit
+        if (count($customerIds) > $maxRecipients) {
+            $customerIds = array_slice($customerIds, 0, $maxRecipients);
+        }
+
+        // Determine scheduled time
+        $scheduledAt = null;
+        if ($request->schedule_mode === 'scheduled' && $request->scheduled_at) {
+            $scheduledAt = Carbon::parse($request->scheduled_at);
+        }
+
+        // Create scheduled message record
+        $scheduledMessage = ScheduledMessage::create([
+            'admin_id' => $user->id,
+            'message' => $request->message,
+            'customer_ids' => $customerIds,
+            'whatsapp_age' => $whatsappAge,
+            'broadcast_type' => 'unpaid',
+            'scheduled_at' => $scheduledAt,
+            'status' => $scheduledAt ? 'pending' : 'processing',
+            'total_count' => count($customerIds),
+        ]);
+
+        // If immediate send, return the customer list for AJAX processing
+        if (!$scheduledAt) {
+            $targets = Customer::whereIn('id', $customerIds)
+                ->whereNotNull('phone')
+                ->get(['id', 'name', 'phone', 'monthly_price']);
+
+            return response()->json([
+                'status' => true,
+                'mode' => 'immediate',
+                'scheduled_message_id' => $scheduledMessage->id,
+                'targets' => $targets,
+                'total' => count($customerIds),
+                'message' => 'Broadcast tagihan dimulai...'
+            ]);
+        }
+
+        // Scheduled for later
+        return response()->json([
+            'status' => true,
+            'mode' => 'scheduled',
+            'scheduled_message_id' => $scheduledMessage->id,
+            'scheduled_at' => $scheduledAt->format('d M Y H:i'),
+            'total' => count($customerIds),
+            'message' => 'Broadcast tagihan dijadwalkan untuk ' . $scheduledAt->format('d M Y H:i')
+        ]);
+    }
+
     // Store a new bill template
     public function storeBillTemplate(Request $request)
     {
@@ -459,36 +574,170 @@ class WhatsappController extends Controller
         $user->api_token = \Illuminate\Support\Str::random(60);
         $user->save();
 
-        return back()->with('success', 'API Key Generated successfully.');
+        return back()->with('success', 'User API Token generated successfully.');
+    }
+
+    public function regenerateGatewayApiKey()
+    {
+        $user = auth()->user();
+
+        if ($user->role == 'superadmin') {
+            $setting = WhatsappSetting::withoutGlobalScopes()->where('admin_id', $user->id)->first();
+        } else {
+            $setting = WhatsappSetting::first();
+        }
+
+        if (!$setting) {
+            return back()->with('error', 'Silakan simpan konfigurasi WhatsApp terlebih dahulu.');
+        }
+
+        $setting->update([
+            'api_key_gateway' => \Illuminate\Support\Str::random(32)
+        ]);
+
+        return back()->with('success', 'WhatsApp Gateway API Key regenerated successfully.');
     }
 
     // --- GATEWAY HELPERS (AJAX) ---
 
     public function getGatewayStatus()
     {
-        $setting = WhatsappSetting::first();
-        $gatewayUrl = $setting->wa_gateway_url ?? 'http://localhost:3000';
+        $user = auth()->user();
+        if ($user->role == 'superadmin') {
+            $setting = WhatsappSetting::withoutGlobalScopes()->where('admin_id', $user->id)->first();
+        } else {
+            $setting = WhatsappSetting::first();
+        }
+
+        if (!$setting) {
+            return response()->json(['status' => 'disconnected', 'message' => 'Settings not found']);
+        }
+
+        $gatewayUrl = $setting->wa_gateway_url;
+        if (empty($gatewayUrl) && $user->role != 'superadmin') {
+            $saSetting = WhatsappSetting::withoutGlobalScopes()->whereHas('admin', function ($q) {
+                $q->where('role', 'superadmin');
+            })->first();
+            $gatewayUrl = $saSetting->wa_gateway_url ?? 'http://localhost:3000';
+        }
+        $gatewayUrl = rtrim($gatewayUrl, '/');
+        $sessionId = $setting->gateway_session;
+
+        if (!$sessionId) {
+            return response()->json(['status' => 'disconnected', 'message' => 'Session not initialized']);
+        }
 
         try {
             $client = new \GuzzleHttp\Client();
-            $response = $client->get($gatewayUrl . '/status', ['timeout' => 5]);
-            return response()->json(json_decode($response->getBody()->getContents(), true));
+            $response = $client->get($gatewayUrl . '/status', [
+                'query' => ['session' => $sessionId],
+                'headers' => [
+                    'x-api-key' => $setting->api_key_gateway,
+                ],
+                'timeout' => 5,
+                'verify' => false
+            ]);
+            $contents = $response->getBody()->getContents();
+            $data = json_decode($contents, true);
+            if (!$data) {
+                return response()->json(['status' => 'disconnected', 'reachable' => false, 'message' => 'Invalid JSON from Gateway']);
+            }
+            $data['reachable'] = true;
+            return response()->json($data);
         } catch (\Exception $e) {
-            return response()->json(['status' => 'disconnected', 'message' => 'Gateway offline']);
+            return response()->json(['status' => 'disconnected', 'reachable' => false, 'message' => $e->getMessage()]);
         }
     }
 
     public function logoutGateway()
     {
-        $setting = WhatsappSetting::first();
-        $gatewayUrl = $setting->wa_gateway_url ?? 'http://localhost:3000';
+        $user = auth()->user();
+        if ($user->role == 'superadmin') {
+            $setting = WhatsappSetting::withoutGlobalScopes()->where('admin_id', $user->id)->first();
+        } else {
+            $setting = WhatsappSetting::first();
+        }
+
+        if (!$setting) {
+            return response()->json(['status' => false, 'message' => 'Settings not found']);
+        }
+
+        $gatewayUrl = $setting->wa_gateway_url;
+        if (empty($gatewayUrl) && $user->role != 'superadmin') {
+            $saSetting = WhatsappSetting::withoutGlobalScopes()->whereHas('admin', function ($q) {
+                $q->where('role', 'superadmin');
+            })->first();
+            $gatewayUrl = $saSetting->wa_gateway_url ?? 'http://localhost:3000';
+        }
+        $gatewayUrl = rtrim($gatewayUrl, '/');
+        $sessionId = $setting->gateway_session;
+
+        if (!$sessionId) {
+            return response()->json(['status' => false, 'message' => 'Session not initialized']);
+        }
 
         try {
             $client = new \GuzzleHttp\Client();
-            $response = $client->post($gatewayUrl . '/logout', ['timeout' => 5]);
+            $response = $client->post($gatewayUrl . '/logout', [
+                'json' => ['session' => $sessionId],
+                'headers' => [
+                    'x-api-key' => $setting->api_key_gateway,
+                ],
+                'timeout' => 5,
+                'verify' => false
+            ]);
+            $contents = $response->getBody()->getContents();
+            $data = json_decode($contents, true);
+            if (!$data) {
+                return response()->json(['status' => false, 'reachable' => false, 'message' => 'Invalid JSON from Gateway']);
+            }
+            $data['reachable'] = true;
+            return response()->json($data);
+        } catch (\Exception $e) {
+            return response()->json(['status' => false, 'reachable' => false, 'message' => $e->getMessage()]);
+        }
+    }
+
+    public function getGatewayLogs()
+    {
+        $user = auth()->user();
+        if ($user->role == 'superadmin') {
+            $setting = WhatsappSetting::withoutGlobalScopes()->where('admin_id', $user->id)->first();
+        } else {
+            $setting = WhatsappSetting::first();
+        }
+
+        if (!$setting) {
+            return response()->json(['logs' => []]);
+        }
+
+        $gatewayUrl = $setting->wa_gateway_url;
+        if (empty($gatewayUrl) && $user->role != 'superadmin') {
+            $saSetting = WhatsappSetting::withoutGlobalScopes()->whereHas('admin', function ($q) {
+                $q->where('role', 'superadmin');
+            })->first();
+            $gatewayUrl = $saSetting->wa_gateway_url ?? 'http://localhost:3000';
+        }
+        $gatewayUrl = rtrim($gatewayUrl, '/');
+        $sessionId = $setting->gateway_session;
+
+        if (!$sessionId) {
+            return response()->json(['logs' => []]);
+        }
+
+        try {
+            $client = new \GuzzleHttp\Client();
+            $response = $client->get($gatewayUrl . '/logs', [
+                'query' => ['session' => $sessionId],
+                'headers' => [
+                    'x-api-key' => $setting->api_key_gateway,
+                ],
+                'timeout' => 5,
+                'verify' => false
+            ]);
             return response()->json(json_decode($response->getBody()->getContents(), true));
         } catch (\Exception $e) {
-            return response()->json(['status' => false, 'message' => 'Gateway offline']);
+            return response()->json(['logs' => []]);
         }
     }
 }

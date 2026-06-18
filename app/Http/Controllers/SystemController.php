@@ -36,8 +36,8 @@ class SystemController extends Controller
     private function getVersion()
     {
         try {
-            // Check if .git folder exists
-            if (!is_dir(base_path('.git'))) {
+            // Check if git folder exists and is valid
+            if (!is_dir(base_path('.git')) || !$this->isValidGitRepo()) {
                 return 'Manual Upload (No Git)';
             }
             return $this->runCommand('git log -1 --format="%h - %s (%cd)" --date=short');
@@ -57,8 +57,8 @@ class SystemController extends Controller
         $githubRepo = env('GITHUB_REPO', 'aangwie/mikbill'); // default repo
         $branch = env('GITHUB_BRANCH', 'main');
 
-        // If no .git folder, try to initialize it
-        if (!is_dir(base_path('.git'))) {
+        // If no .git folder or not a valid repo, try to initialize it
+        if (!is_dir(base_path('.git')) || !$this->isValidGitRepo()) {
             if (empty($githubToken)) {
                 return back()->with([
                     'status' => 'warning',
@@ -70,19 +70,25 @@ class SystemController extends Controller
             // Initialize git with token
             try {
                 $log[] = ">>> INITIALIZING GIT...";
-                $this->runCommandSafe('git init');
+                // Use runCommand instead of runCommandSafe to throw on failure here
+                $log[] = $this->runCommand('git init 2>&1');
+
                 $remoteUrl = "https://{$githubToken}@github.com/{$githubRepo}.git";
-                $this->runCommandSafe("git remote add origin {$remoteUrl}");
-                $this->runCommandSafe('git fetch origin');
-                $this->runCommandSafe("git checkout -f origin/{$branch}");
-                $this->runCommandSafe("git branch -M {$branch}");
-                $this->runCommandSafe("git reset --hard origin/{$branch}");
+
+                // Remove remote if exists
+                $this->runCommandSafe('git remote remove origin 2>&1');
+
+                $log[] = $this->runCommand("git remote add origin {$remoteUrl} 2>&1");
+                $log[] = $this->runCommand("git fetch origin {$branch} 2>&1");
+                $log[] = $this->runCommand("git checkout -f -B {$branch} origin/{$branch} 2>&1");
+                $log[] = $this->runCommand("git reset --hard origin/{$branch} 2>&1");
+
                 $log[] = "Git repository initialized successfully!";
             } catch (\Exception $e) {
                 return back()->with([
                     'status' => 'error',
                     'message' => 'Gagal inisialisasi git repository.',
-                    'log' => $e->getMessage()
+                    'log' => implode("\n", $log) . "\n\n>>> ERROR:\n" . $e->getMessage()
                 ]);
             }
         }
@@ -323,6 +329,76 @@ class SystemController extends Controller
     }
 
     /**
+     * Create storage symlink for shared hosting
+     * Links: DOCUMENT_ROOT/storage -> laravel_base/storage/app/public
+     */
+    public function createSymlink()
+    {
+        $log = [];
+
+        try {
+            // Target: Laravel's storage/app/public
+            $target = storage_path('app/public');
+
+            // Link: DOCUMENT_ROOT/storage (public_html/storage on shared hosting)
+            $link = (isset($_SERVER['DOCUMENT_ROOT']) && !empty($_SERVER['DOCUMENT_ROOT']))
+                ? $_SERVER['DOCUMENT_ROOT'] . '/storage'
+                : public_path('storage');
+
+            $log[] = ">>> STORAGE SYMLINK";
+            $log[] = "Target : " . $target;
+            $log[] = "Link   : " . $link;
+            $log[] = "--------------------------------------------------";
+
+            // Check if target directory exists
+            if (!is_dir($target)) {
+                mkdir($target, 0755, true);
+                $log[] = "Created target directory: " . $target;
+            }
+
+            // Remove existing symlink or directory
+            if (is_link($link)) {
+                unlink($link);
+                $log[] = "Removed existing symlink.";
+            } elseif (is_dir($link)) {
+                // If it's a real directory (not symlink), rename it as backup
+                rename($link, $link . '_backup_' . date('Ymd_His'));
+                $log[] = "Existing directory renamed to backup.";
+            }
+
+            // Create symlink
+            if (symlink($target, $link)) {
+                $log[] = ">>> Symlink created successfully!";
+
+                return back()->with([
+                    'status' => 'success',
+                    'message' => 'Storage symlink berhasil dibuat!',
+                    'log' => implode("\n", $log)
+                ]);
+            } else {
+                $log[] = ">>> Failed to create symlink. Trying alternative method...";
+
+                // Alternative: Use Artisan command
+                $artisanOutput = $this->runCommandSafe('php artisan storage:link 2>&1');
+                $log[] = $artisanOutput;
+
+                return back()->with([
+                    'status' => 'success',
+                    'message' => 'Storage symlink dibuat via artisan!',
+                    'log' => implode("\n", $log)
+                ]);
+            }
+        } catch (\Exception $e) {
+            $log[] = ">>> ERROR: " . $e->getMessage();
+            return back()->with([
+                'status' => 'error',
+                'message' => 'Gagal membuat storage symlink.',
+                'log' => implode("\n", $log)
+            ]);
+        }
+    }
+
+    /**
      * Run command without throwing exception
      */
     private function runCommandSafe($command)
@@ -330,5 +406,15 @@ class SystemController extends Controller
         $process = Process::fromShellCommandline($command, base_path());
         $process->run();
         return trim($process->getOutput() ?: $process->getErrorOutput());
+    }
+
+    /**
+     * Check if current directory is a valid git repository
+     */
+    private function isValidGitRepo()
+    {
+        $process = Process::fromShellCommandline('git rev-parse --is-inside-work-tree', base_path());
+        $process->run();
+        return trim($process->getOutput()) === 'true';
     }
 }

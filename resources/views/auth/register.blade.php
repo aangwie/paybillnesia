@@ -27,6 +27,12 @@
     <!-- Tailwind & Alpine -->
     <script src="https://cdn.tailwindcss.com"></script>
     <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.13.3/dist/cdn.min.js"></script>
+
+    @if(isset($turnstileSiteKey) && $turnstileSiteKey)
+    <!-- Cloudflare Turnstile -->
+    <script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
+    @endif
+
     <script>
         tailwind.config = {
             darkMode: 'class',
@@ -95,8 +101,18 @@
                     </div>
                 @endif
 
-                <form class="space-y-4" action="{{ route('register.post') }}" method="POST">
+                <form class="space-y-4" action="{{ route('register.post') }}" method="POST" id="registerForm">
                     @csrf
+
+                    <!-- HONEYPOT FIELD: Field tersembunyi untuk menjebak bot -->
+                    <div style="position: absolute; left: -9999px; opacity: 0;" aria-hidden="true">
+                        <label for="website">Website</label>
+                        <input type="text" id="website" name="website" tabindex="-1" autocomplete="off">
+                    </div>
+
+                    <!-- FORM TIME: Timestamp saat form di-load -->
+                    <input type="hidden" name="form_time" id="form_time" value="">
+
                     <div>
                         <label for="name"
                             class="block text-sm font-semibold leading-6 text-slate-900 dark:text-white">Nama
@@ -151,8 +167,18 @@
                         </div>
                     </div>
 
+                    @if(isset($turnstileSiteKey) && $turnstileSiteKey)
+                    <!-- Cloudflare Turnstile Widget -->
+                    <div class="pt-2 flex justify-center">
+                        <div class="cf-turnstile" data-sitekey="{{ $turnstileSiteKey }}" data-theme="{{ (isset($darkMode) && $darkMode) ? 'dark' : 'light' }}" data-callback="onTurnstileSuccess"></div>
+                        @error('cf-turnstile-response')
+                            <p class="mt-1 text-sm text-red-600">{{ $message }}</p>
+                        @enderror
+                    </div>
+                    @endif
+
                     <div class="pt-2">
-                        <button type="submit"
+                        <button type="submit" id="registerBtn"
                             class="flex w-full justify-center rounded-lg bg-[#352f99] px-3 py-3 text-sm font-bold leading-6 text-white shadow-lg hover:bg-indigo-800 transition-all duration-200">
                             Daftar Sekarang <i class="fas fa-paper-plane ml-2 mt-0.5"></i>
                         </button>
@@ -180,6 +206,13 @@
             </div>
         </div>
     </div>
+
+    <script>
+    document.addEventListener('DOMContentLoaded', function() {
+        // Set form_time (timestamp dalam detik saat halaman di-load)
+        document.getElementById('form_time').value = Math.floor(Date.now() / 1000);
+    });
+    </script>
 </body>
 
 </html>
